@@ -74,6 +74,20 @@ func NewSession(userID string, subscriptionTier SubscriptionType, engagementLeve
 func (s *Session) IncrementEvent(rng *rand.Rand, config *config.Config) {
     now := time.Now()
 
+    // Continue with the next event if the current time is past the next event time
+    if now.After(s.NextEventTime) {
+        switch s.NextEventType {
+        case "Content":
+            if s.CurrentContent != nil {
+                s.handleContentEvent(rng, config)
+            }
+        case "AdStart", "AdImpression", "AdComplete":
+            if s.CurrentAd != nil {
+                s.handleAdEvent(rng, config)
+            }
+        }
+    }
+
     // Determine the next event based on the current state
     if s.CurrentContent != nil && (now.After(s.NextEventTime) || s.NextEventType == "Content") {
         if s.CurrentContent.Type == Audio {
@@ -89,6 +103,18 @@ func (s *Session) IncrementEvent(rng *rand.Rand, config *config.Config) {
     }
 
 
+}
+
+func (s *Session) handleContentEvent(rng *rand.Rand, config *config.Config) {
+    if s.CurrentContent.Type == Audio {
+        s.handleNextAudioEvent(rng, config)
+    } else if s.CurrentContent.Type == Video {
+        if shouldInsertAd(s, config) {
+            s.startAdSequence("video", rng, config)
+        } else {
+            s.scheduleNextEvent("video content", rng, config)
+        }
+    }
 }
 
 func (s *Session) handleNextAudioEvent(rng *rand.Rand, config *config.Config) {
@@ -112,9 +138,28 @@ func (s *Session) handleNextVideoEvent(rng *rand.Rand, config *config.Config) {
 }
 
 func (s *Session) handleAdEvent(rng *rand.Rand, config *config.Config) {
-    // Logic to handle the end of an ad and transition back to content
-    s.CurrentAd = nil  // Assume ad ends
-    s.scheduleNextEvent("resume content", rng, config)
+    // Logic for transitioning from one ad-related event to the next
+    switch s.NextEventType {
+    case "AdStart":
+        // Move to AdImpression
+        s.CurrentAd.StartTime = time.Now()
+        s.NextEventType = "AdImpression"
+        s.NextEventTime = time.Now().Add(time.Duration(rng.Intn(10)+1) * time.Second) // Ad impressions occur shortly after ad starts
+    case "AdImpression":
+        // Move to AdComplete or next AdImpression
+        if rng.Float64() < 0.8 { // 80% chance to go to next impression
+            s.NextEventType = "AdImpression"
+            s.NextEventTime = time.Now().Add(time.Duration(rng.Intn(10)+1) * time.Second)
+        } else {
+            s.NextEventType = "AdComplete"
+            s.NextEventTime = time.Now().Add(time.Duration(rng.Intn(5)+1) * time.Second)
+        }
+    case "AdComplete":
+        // Finish the ad sequence and resume content
+        s.CurrentAd = nil
+        s.NextEventType = "Content"
+        s.scheduleNextEvent("resume content", rng, config)
+    }
 }
 
 func (s *Session) startAdSequence(_ string, _ *rand.Rand, _ *config.Config) {
@@ -132,7 +177,11 @@ func (s *Session) scheduleNextEvent(eventType string, rng *rand.Rand, _ *config.
     s.NextEventType = eventType
 }
 
-func shouldInsertAd(s *Session, _ *config.Config) bool {
+func shouldInsertAd(s *Session, config *config.Config) bool {
+    if s.SubscriptionTier != Free || s.CurrentContent.Type != Video {
+        return false // No ads for non-free users or audio
+    }
+
     // Implement ad insertion logic based on user tier and video breakpoints
     if s.SubscriptionTier == Free && s.CurrentContent.Type == Video {
         currentTime := time.Since(s.StartTime)
@@ -142,6 +191,20 @@ func shouldInsertAd(s *Session, _ *config.Config) bool {
             }
         }
     }
+
+    // Pre-roll Ads  
+    if s.shouldInsertPreRollAd(config) { 
+        return true    
+    }
+
+    // Mid-Roll Ads (only if pre-roll didn't occur)
+    currentTime := time.Since(s.CurrentContent.StartTime) // Use Content Start Time
+    for _, bp := range s.CurrentContent.Breakpoints {
+        if currentTime > bp && currentTime-bp < config.AdConfig.MidRollWindow {
+            return true 
+        }
+    }
+
     return false
 }
 
@@ -160,4 +223,18 @@ func (s *Session) IsDone() bool {
 
 func (s *Session) MarkAsFinished() {
     s.Finished = true
+}
+
+func (s *Session) shouldInsertPreRollAd(config *config.Config) bool {
+    // Consider factors like time since the last ad
+    if time.Since(s.LastAdTime) < config.AdConfig.PreRollCooldown {
+        return false
+    }
+    
+    // Probabilistic logic based on config.AdConfig.PreRollFrequency 
+    if rand.Float64() < config.AdConfig.PreRollFrequency {
+        s.LastAdTime = time.Now() // Update for cooldown 
+        return true
+    }
+    return false  
 }

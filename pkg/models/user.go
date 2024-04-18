@@ -51,10 +51,16 @@ func (u *User) NextEvent(rng *rand.Rand, config *config.Config) {
 }
 
 // startNewSession initializes a new session for the user.
-func (u *User) startNewSession(_ *rand.Rand) {
-	u.CurrentSession = NewSession(u.Auth, u.SubscriptionType, u.ViewingHours, u.StartTime)
-}
+func (u *User) startNewSession(rng *rand.Rand, config *config.Config) {
+	// Example of determining the session's starting point or other dynamic attributes
+	state, err := config.StateMachine.GetInitialState(rng) // Assuming StateMachine can provide an initial state
+	if err != nil {
+			fmt.Printf("Failed to get initial state for session: %s\n", err)
+			return
+	}
 
+	u.CurrentSession = NewSession(u.Auth, state, u.SubscriptionType, u.StartTime)
+}
 // Serialize serializes the user's current state to a JSON string for logging.
 func (u *User) Serialize() string {
 	data := map[string]interface{}{
@@ -74,3 +80,5 @@ func (u *User) Serialize() string {
 	}
 	return string(jsonData)
 }
+
+

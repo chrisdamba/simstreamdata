@@ -1,23 +1,84 @@
 package simulator
 
 import (
-    "math/rand"
+	"log"
+	"math/rand"
+	"os"
+	"time"
 
-		"github.com/chrisdamba/simstreamdata/pkg/config"
-		"github.com/chrisdamba/simstreamdata/pkg/models"
+	"github.com/Shopify/sarama"
+	"github.com/chrisdamba/simstreamdata/pkg/config"
+	"github.com/chrisdamba/simstreamdata/pkg/models"
 )
+
+type OutputDestination interface {
+    WriteMessage(msg []byte) error
+}
+
+type KafkaOutput struct {
+    producer sarama.SyncProducer
+    topic    string
+}
 
 type Simulator struct {
     Config *config.Config
     Users  []*models.User
 }
 
-func NewSimulator(cfg *config.Config) *Simulator {
-    rand.Seed(cfg.Seed)
-    return &Simulator{
-        Config: cfg,
-        Users:  make([]*models.User, cfg.NUsers),
+type FileOutput struct {
+    file *os.File
+}
+
+type ConsoleOutput struct{}
+
+func (f *FileOutput) WriteMessage(msg []byte) error {
+    _, err := f.file.Write(msg)
+    return err
+}
+
+func (k *KafkaOutput) WriteMessage(msg []byte) error {
+    _, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
+        Topic: k.topic,
+        Value: sarama.ByteEncoder(msg),
+    })
+    return err
+}
+
+func (c *ConsoleOutput) WriteMessage(msg []byte) error {
+    _, err := os.Stdout.Write(msg)
+    return err
+}
+
+func (sim *Simulator) determineOutputDestination(config *config.Config) OutputDestination {
+    if config.Kafka.Enabled {
+        producer, err := sarama.NewSyncProducer(config.Kafka.Brokers, nil) // Assuming 'Brokers' field
+        if err != nil {
+            log.Fatalf("Failed to create Kafka producer: %s", err)
+        }
+        // Assuming cleanProducerClose function implemented
+        defer cleanProducerClose(producer)
+
+        return &KafkaOutput{producer: producer, topic: config.Kafka.Topic} 
+    } else if config.OutputFile != "" {
+        file, err := os.Create(config.OutputFile)
+        if err != nil {
+            log.Fatalf("Failed to create output file: %s", err)
+        }
+        return &FileOutput{file: file}
     }
+    return &ConsoleOutput{}
+}
+
+// Placeholder: Ensures proper closure of the Kafka producer
+func cleanProducerClose(producer sarama.SyncProducer) {
+    if err := producer.Close(); err != nil {
+        log.Println("Error closing Kafka producer:", err)
+    }
+}
+
+// Helper to generate log-normal values
+func randomLogNormal(mean, stddev float64) float64 {
+    return rand.NormFloat64()*stddev + mean
 }
 
 func (sim *Simulator) initializeUsers() {
@@ -47,14 +108,25 @@ func (sim *Simulator) initializeUsers() {
     }
 }
 
+func (sim *Simulator) AddSession(user *models.User) {
+    sim.Users = append(sim.Users, user)
+}
 
 func (sim *Simulator) weightedRandomAuthLevel() string {
     return sim.selectRandomPreference(sim.Config.AuthLevels).Name
 }
 
 func (sim *Simulator) weightedRandomSubscriptionType() models.SubscriptionType {
-    chosen := sim.selectRandomPreference(sim.Config.SubscriptionChances)
+    chosen := sim.selectRandomPreference(convertToPreferences(sim.Config.SubscriptionChances))
     return models.SubscriptionType(chosen.Name)
+}
+
+func convertToPreferences(subscriptionChances []config.SubscriptionChance) []config.Preference {
+    preferences := make([]config.Preference, len(subscriptionChances))
+    for i, chance := range subscriptionChances {
+        preferences[i] = config.Preference(chance)
+    }
+    return preferences
 }
 
 func (sim *Simulator) selectRandomPreference(preferences []config.Preference) config.Preference {
@@ -76,7 +148,7 @@ func (sim *Simulator) randomViewingHours() int {
     return rand.Intn(41) // Random hours from 0 to 40
 }
 
-func (sim *Simulator) selectRandomPreferences(items []config.PreferenceItem, count int) []string {
+func (sim *Simulator) selectRandomPreferences(items []config.Preference, count int) []string {
     selected := make([]string, count)
     for i := 0; i < count; i++ {
         totalWeight := 0
@@ -94,15 +166,20 @@ func (sim *Simulator) selectRandomPreferences(items []config.PreferenceItem, cou
     }
     return selected
 }
-func (s *Simulator) RunSimulation() {
-    for _, _ := range s.Users {
-        // Determine if the session involves video and possibly trigger ads
-        if contentType := s.pickContentType(); contentType == "video" {
-            if rand.Float64() < s.Config.AdConfig.VideoAdFrequency {
-                s.handleVideoAds()
-            }
+
+func (sim *Simulator) RunSimulation() {
+    sim.initializeUsers() // Initialize users as before
+
+    // Ticker for simulation
+    ticker := time.NewTicker(1 * time.Second) 
+    defer ticker.Stop()
+
+    for range ticker.C {
+        output := sim.determineOutputDestination(sim.Config) // Get output destination once
+
+        for _, user := range sim.Users {
+            user.NextEvent(sim.Config, output) // Let users generate events
         }
-        // Continue with other simulation tasks
     }
 }
 
@@ -131,9 +208,22 @@ func (s *Simulator) handleVideoAds() {
     }
 }
 
-
 func (sim *Simulator) determineAuthLevel() string {
     // Randomly determine auth level; this is simplified, expand as needed
     authLevels := []string{"Guest", "Logged In", "Logged Out"}
     return authLevels[rand.Intn(len(authLevels))]
+}
+
+
+func newKafkaProducer(brokerList []string) sarama.SyncProducer {
+    config := sarama.NewConfig()
+    config.Producer.RequiredAcks = sarama.WaitForAll          // Ensure data is written to all replicas
+    config.Producer.Retry.Max = 10                            // Retry up to 10 times to produce messages
+    config.Producer.Return.Successes = true
+
+    producer, err := sarama.NewSyncProducer(brokerList, config)
+    if err != nil {
+        log.Fatalf("Failed to start Sarama producer: %s", err)
+    }
+    return producer
 }
