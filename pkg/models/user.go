@@ -44,7 +44,7 @@ func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subsc
 // NextEvent processes the next event based on the user's current state.
 func (u *User) NextEvent(rng *rand.Rand, config *config.Config) {
 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
-		u.startNewSession(rng)
+		u.startNewSession(rng, config)
 	} else {
 		u.CurrentSession.IncrementEvent(rng, config)
 	}
@@ -52,25 +52,46 @@ func (u *User) NextEvent(rng *rand.Rand, config *config.Config) {
 
 // startNewSession initializes a new session for the user.
 func (u *User) startNewSession(rng *rand.Rand, config *config.Config) {
-	// Example of determining the session's starting point or other dynamic attributes
-	state, err := config.StateMachine.GetInitialState(rng) // Assuming StateMachine can provide an initial state
-	if err != nil {
-			fmt.Printf("Failed to get initial state for session: %s\n", err)
-			return
+	// Ensure there are session pages to choose from
+	if len(config.NewSessionPages) == 0 {
+			panic("no session pages available in configuration")
 	}
 
-	u.CurrentSession = NewSession(u.Auth, state, u.SubscriptionType, u.StartTime)
+	// Select a random session page from the configuration
+	randomIndex := rng.Intn(len(config.NewSessionPages))
+	page := config.NewSessionPages[randomIndex]
+
+	// Create a new state based on the randomly selected session page
+	state := &State{
+			Page:       page.Page,
+			StatusCode: page.Status,
+			Method:     page.Method,
+			UserLevel:  page.Level,
+			AuthStatus: page.Auth,
+	}
+
+	// Assume a default engagement level, or compute it based on some logic
+	engagementLevel := 0  // Placeholder for actual logic
+
+	// Create a new session with the selected state
+	u.CurrentSession = NewSession(u.Auth, state, u.SubscriptionType, engagementLevel, u.StartTime)
 }
+
 // Serialize serializes the user's current state to a JSON string for logging.
 func (u *User) Serialize() string {
 	data := map[string]interface{}{
-		"userId":           u.Auth,
-		"sessionPage":      u.CurrentSession.CurrentState.Page,
-		"sessionAuth":      u.CurrentSession.CurrentState.AuthStatus,
-		"preferredGenres":  u.PreferredGenres,
-		"favoriteShows":    u.FavoriteShows,
-		"viewingHours":     u.ViewingHours,
-		"subscriptionType": u.SubscriptionType,
+		"ts":              u.CurrentSession.CurrentState.CurrentEventTime.UnixMilli(),  // UNIX milliseconds 
+		"userId":          u.Auth,
+		"sessionId":       u.CurrentSession.ID,
+		"page":            u.CurrentSession.CurrentState.Page,
+		"auth":            u.CurrentSession.CurrentState.AuthStatus,
+		"method":          u.CurrentSession.CurrentState.Method,
+		"status":          u.CurrentSession.CurrentState.StatusCode,
+		"itemInSession":   u.CurrentSession.NextEventNumber, // Adapt based on your counter 
+		"preferredGenres": u.PreferredGenres,
+		"favoriteShows":   u.FavoriteShows,
+		"viewingHours":    u.ViewingHours,
+		"subscriptionType": string(u.SubscriptionType),
 	}
 
 	jsonData, err := json.Marshal(data)

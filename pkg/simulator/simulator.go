@@ -1,6 +1,7 @@
 package simulator
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"os"
@@ -50,15 +51,15 @@ func (c *ConsoleOutput) WriteMessage(msg []byte) error {
 }
 
 func (sim *Simulator) determineOutputDestination(config *config.Config) OutputDestination {
-    if config.Kafka.Enabled {
-        producer, err := sarama.NewSyncProducer(config.Kafka.Brokers, nil) // Assuming 'Brokers' field
+    if config.KafkaEnabled {
+        producer, err := sarama.NewSyncProducer(config.KafkaBrokerList, nil) // Assuming 'Brokers' field
         if err != nil {
             log.Fatalf("Failed to create Kafka producer: %s", err)
         }
         // Assuming cleanProducerClose function implemented
         defer cleanProducerClose(producer)
 
-        return &KafkaOutput{producer: producer, topic: config.Kafka.Topic} 
+        return &KafkaOutput{producer: producer, topic: config.KafkaTopic} 
     } else if config.OutputFile != "" {
         file, err := os.Create(config.OutputFile)
         if err != nil {
@@ -84,8 +85,7 @@ func randomLogNormal(mean, stddev float64) float64 {
 func (sim *Simulator) initializeUsers() {
     for i := 0; i < sim.Config.NUsers; i++ {
         // Generate random preferences based on weighted selections
-        preferredGenres := sim.selectRandomPreferences(sim.Config.Genres, 3)
-        favoriteShows := sim.selectRandomPreferences(sim.Config.Shows, 3)
+        initialLevel := sim.weightedRandomInitialLevel()
 
         // Determine the authorization level and subscription type with weights
         authLevel := sim.weightedRandomAuthLevel()
@@ -98,10 +98,8 @@ func (sim *Simulator) initializeUsers() {
             randomLogNormal(sim.Config.Beta, 0.5),
             startTime,
             authLevel,
+            initialLevel,
             subscriptionType,
-            preferredGenres,
-            favoriteShows,
-            sim.randomViewingHours(),
         )
 
         sim.AddSession(user)
@@ -114,6 +112,10 @@ func (sim *Simulator) AddSession(user *models.User) {
 
 func (sim *Simulator) weightedRandomAuthLevel() string {
     return sim.selectRandomPreference(sim.Config.AuthLevels).Name
+}
+
+func (sim *Simulator) weightedRandomInitialLevel() string {
+    return sim.selectRandomPreference(sim.Config.Levels).Name
 }
 
 func (sim *Simulator) weightedRandomSubscriptionType() models.SubscriptionType {
@@ -215,7 +217,7 @@ func (sim *Simulator) determineAuthLevel() string {
 }
 
 
-func newKafkaProducer(brokerList []string) sarama.SyncProducer {
+func newKafkaProducer(brokerList []string) (sarama.SyncProducer, func(), error) {
     config := sarama.NewConfig()
     config.Producer.RequiredAcks = sarama.WaitForAll          // Ensure data is written to all replicas
     config.Producer.Retry.Max = 10                            // Retry up to 10 times to produce messages
@@ -223,7 +225,15 @@ func newKafkaProducer(brokerList []string) sarama.SyncProducer {
 
     producer, err := sarama.NewSyncProducer(brokerList, config)
     if err != nil {
-        log.Fatalf("Failed to start Sarama producer: %s", err)
+        return nil, nil, fmt.Errorf("failed to start Sarama producer: %w", err)
     }
-    return producer
+
+    // Cleanup function to close the producer
+    cleanup := func() {
+        if err := producer.Close(); err != nil {
+            log.Printf("Failed to close Kafka producer: %s", err)
+        }
+    }
+
+    return producer, cleanup, nil
 }

@@ -2,15 +2,17 @@ package models
 
 import (
 	"math/rand"
+	"time"
 )
 
 type State struct {
-    Page         string
-    StatusCode   int
-		Method       string
-    UserLevel    string
-    AuthStatus   string
-    ShowDetails  bool
+    Page         			string
+    StatusCode   			int
+		Method       			string
+    UserLevel    			string
+    AuthStatus   			string
+    ShowDetails  			bool
+		CurrentEventTime 	time.Time
 }
 
 type Transition struct {

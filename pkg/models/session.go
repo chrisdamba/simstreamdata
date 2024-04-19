@@ -35,6 +35,7 @@ type Content struct {
     Type        ContentType
     Duration    time.Duration 
     Breakpoints []time.Duration // Mid-roll ads breakpoints for video
+    StartTime   time.Time
 }
 
 type Session struct {
@@ -52,6 +53,8 @@ type Session struct {
     // State tracking
     NextEventTime   time.Time
     NextEventType   string  // "Content", "AdStart", "AdImpression", "AdComplete" 
+    NextEventNumber int // Add NextEventNumber field to track the number of events in the session
+    LastAdTime      time.Time
 
     // User-related (for ad logic)
     SubscriptionTier SubscriptionType
@@ -59,15 +62,16 @@ type Session struct {
     Finished         bool
 }
 
-func NewSession(userID string, subscriptionTier SubscriptionType, engagementLevel int, startTime time.Time) *Session {
+func NewSession(userID string, state *State, subscriptionTier SubscriptionType, engagementLevel int, startTime time.Time) *Session {
     sessionID := fmt.Sprintf("%s-%d", userID, time.Now().UnixNano())
     return &Session{
-         ID: sessionID,
-         UserID: userID,
-         SubscriptionTier: subscriptionTier,
-         EngagementLevel: engagementLevel,
-         StartTime: startTime,
-         LastEvent: startTime,
+        ID: sessionID,
+        UserID: userID,
+        SubscriptionTier: subscriptionTier,
+        EngagementLevel: engagementLevel,
+        StartTime: startTime,
+        LastEvent: startTime,
+        CurrentState: state,
     }
 }
 
@@ -129,12 +133,22 @@ func (s *Session) handleNextAudioEvent(rng *rand.Rand, config *config.Config) {
 }
 
 func (s *Session) handleNextVideoEvent(rng *rand.Rand, config *config.Config) {
-    // Check for mid-roll ads in video
-    if shouldInsertAd(s, config) {
-        s.startAdSequence("video", rng, config)
-    } else {
-        s.scheduleNextEvent("video content", rng, config)
+    currentTime := time.Since(s.CurrentContent.StartTime)
+
+    // Check for pre-roll ad first
+    if currentTime < config.AdConfig.PreRollCooldown && s.shouldInsertPreRollAd(config) {
+        s.startAdSequence("pre-roll", rng, config)
+        return
     }
+
+    // Check for mid-roll ads
+    if s.shouldInsertMidRollAd(config) {
+        s.startAdSequence("mid-roll", rng, config)
+        return
+    }
+
+    // If no ads are to be inserted, schedule the next content event
+    s.scheduleNextEvent("video content", rng, config)
 }
 
 func (s *Session) handleAdEvent(rng *rand.Rand, config *config.Config) {
@@ -162,13 +176,28 @@ func (s *Session) handleAdEvent(rng *rand.Rand, config *config.Config) {
     }
 }
 
-func (s *Session) startAdSequence(_ string, _ *rand.Rand, _ *config.Config) {
-    // Start a sequence of ad-related events
-    adType := "pre-roll" // Simplified example
-    s.CurrentAd = &Ad{ID: "Ad123", Type: adType, Duration: 30 * time.Second}
-    s.NextEventType = "AdStart"
-    s.NextEventTime = time.Now().Add(10 * time.Second)  // Start ad in 10 seconds
+// startAdSequence initializes an ad sequence based on the ad type (pre-roll or mid-roll).
+func (s *Session) startAdSequence(adType string, rng *rand.Rand, config *config.Config) {
+	// Generate an ad ID and determine the ad duration based on type.
+	adID := fmt.Sprintf("Ad-%d", rng.Int())
+	adDuration := 30 * time.Second // Simplified example: 30-second ads
+
+	// Update the session to reflect the ad start.
+	s.CurrentAd = &Ad{
+		ID:        adID,
+		Type:      adType,
+		Duration:  adDuration,
+		StartTime: time.Now(),
+	}
+
+	// Set the next event type to "AdStart" and schedule it immediately.
+	s.NextEventType = "AdStart"
+	s.NextEventTime = time.Now()
+
+	// Log the ad start for debugging.
+	fmt.Printf("Starting %s ad at %v, ID: %s\n", adType, s.NextEventTime, adID)
 }
+
 
 func (s *Session) scheduleNextEvent(eventType string, rng *rand.Rand, _ *config.Config) {
     // Calculate the next event time based on content or ad logic
@@ -177,34 +206,41 @@ func (s *Session) scheduleNextEvent(eventType string, rng *rand.Rand, _ *config.
     s.NextEventType = eventType
 }
 
+
+// shouldInsertAd decides if an ad should be inserted at any point in the video content.
 func shouldInsertAd(s *Session, config *config.Config) bool {
+    // Directly return false if the session is not eligible for ads.
     if s.SubscriptionTier != Free || s.CurrentContent.Type != Video {
-        return false // No ads for non-free users or audio
+        return false // No ads for non-free users or for non-video content.
     }
 
-    // Implement ad insertion logic based on user tier and video breakpoints
-    if s.SubscriptionTier == Free && s.CurrentContent.Type == Video {
-        currentTime := time.Since(s.StartTime)
-        for _, bp := range s.CurrentContent.Breakpoints {
-            if currentTime > bp && currentTime-bp < time.Minute {
-                return true // Insert ad at breakpoint
-            }
-        }
+    // Check for pre-roll ad opportunity.
+    // Assuming pre-roll ads can only start at the beginning of a video session or content play.
+    if s.CurrentContent.StartTime == s.StartTime && s.shouldInsertPreRollAd(config) {
+        return true
     }
 
-    // Pre-roll Ads  
-    if s.shouldInsertPreRollAd(config) { 
-        return true    
-    }
+    // Check for mid-roll ad opportunities based on defined breakpoints.
+    return s.shouldInsertMidRollAd(config)
+}
 
-    // Mid-Roll Ads (only if pre-roll didn't occur)
-    currentTime := time.Since(s.CurrentContent.StartTime) // Use Content Start Time
+// shouldInsertPreRollAd checks if a pre-roll ad should be inserted
+func (s *Session) shouldInsertPreRollAd(config *config.Config) bool {
+    if time.Since(s.LastAdTime) >= config.AdConfig.PreRollCooldown && rand.Float64() < config.AdConfig.PreRollFrequency {
+        s.LastAdTime = time.Now() // Update the last ad time to now
+        return true
+    }
+    return false
+}
+
+// shouldInsertMidRollAd checks if a mid-roll ad should be inserted based on breakpoints
+func (s *Session) shouldInsertMidRollAd(config *config.Config) bool {
+    currentTime := time.Since(s.CurrentContent.StartTime)
     for _, bp := range s.CurrentContent.Breakpoints {
         if currentTime > bp && currentTime-bp < config.AdConfig.MidRollWindow {
-            return true 
+            return true
         }
     }
-
     return false
 }
 
@@ -223,18 +259,4 @@ func (s *Session) IsDone() bool {
 
 func (s *Session) MarkAsFinished() {
     s.Finished = true
-}
-
-func (s *Session) shouldInsertPreRollAd(config *config.Config) bool {
-    // Consider factors like time since the last ad
-    if time.Since(s.LastAdTime) < config.AdConfig.PreRollCooldown {
-        return false
-    }
-    
-    // Probabilistic logic based on config.AdConfig.PreRollFrequency 
-    if rand.Float64() < config.AdConfig.PreRollFrequency {
-        s.LastAdTime = time.Now() // Update for cooldown 
-        return true
-    }
-    return false  
 }
