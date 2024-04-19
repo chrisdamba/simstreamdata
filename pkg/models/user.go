@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/chrisdamba/simstreamdata/pkg/config"
+	"github.com/google/uuid"
 )
 
 // User holds the data for a simulated user.
 type User struct {
+	ID               uuid.UUID
 	Alpha            float64
 	Beta             float64
 	StartTime        time.Time
@@ -29,6 +31,7 @@ type User struct {
 // NewUser creates a new User instance.
 func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subscriptionType SubscriptionType) *User {
 	return &User{
+		ID:               uuid.New(),
 		Alpha:            alpha,
 		Beta:             beta,
 		StartTime:        startTime,
@@ -91,14 +94,14 @@ func (u *User) startNewSession(rng *rand.Rand, config *config.Config) {
 	engagementLevel := 0  // Placeholder for actual logic
 
 	// Create a new session with the selected state
-	u.CurrentSession = NewSession(u.Auth, state, u.SubscriptionType, engagementLevel, u.StartTime)
+	u.CurrentSession = NewSession(u.ID.String(), state, u.SubscriptionType, engagementLevel, u.StartTime)
 }
 
 // Serialize serializes the user's current state to a JSON string for logging.
 func (u *User) Serialize() string {
 	data := map[string]interface{}{
 		"ts":              u.CurrentSession.CurrentState.CurrentEventTime.UnixMilli(),  // UNIX milliseconds 
-		"userId":          u.Auth,
+		"userId":          u.ID.String(),
 		"sessionId":       u.CurrentSession.ID,
 		"page":            u.CurrentSession.CurrentState.Page,
 		"auth":            u.CurrentSession.CurrentState.AuthStatus,

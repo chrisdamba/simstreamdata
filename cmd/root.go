@@ -21,6 +21,9 @@ var rootCmd = &cobra.Command{
     Short: "Simulates streaming data for media platforms",
     Long: `Simstreamdata is a CLI tool to simulate event streaming data from users interacting with a media platform like video or music streaming services.`,
     Run: func(cmd *cobra.Command, args []string) {
+        now := time.Now().Format(time.RFC3339)
+        viper.SetDefault("start-time", now)  // This sets it if not already set via config or flags
+
         cfg, err := config.LoadConfig(cfgFile)
         if err != nil {
             fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
@@ -34,11 +37,6 @@ var rootCmd = &cobra.Command{
             field := v.Field(i)
             fmt.Printf("%s: %v\n", t.Field(i).Name, field.Interface())
         }
-        if err := viper.Unmarshal(&cfg); err != nil {
-            fmt.Fprintf(os.Stderr, "Failed to unmarshal configuration: %v\n", err)
-            os.Exit(1)
-        }
-
         sim := simulator.NewSimulator(cfg)
         sim.RunSimulation()
     },

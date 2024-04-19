@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"time"
+
+	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 )
 
@@ -111,7 +113,13 @@ func LoadConfig(cfgFile string) (*Config, error) {
 	}
 
 	var config Config
-	if err := viper.Unmarshal(&config); err != nil {
+	decoderConfigOption := viper.DecoderConfigOption(func(config *mapstructure.DecoderConfig) {
+		config.DecodeHook = mapstructure.ComposeDecodeHookFunc(
+				config.DecodeHook,
+				mapstructure.StringToTimeHookFunc(time.RFC3339), 
+		)
+	})
+	if err := viper.Unmarshal(&config, decoderConfigOption); err != nil {
 		return nil, fmt.Errorf("unable to decode into struct, %w", err)
 	}
 
