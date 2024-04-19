@@ -9,6 +9,7 @@ import (
 	// "time"
 
 	"github.com/chrisdamba/simstreamdata/pkg/config"
+    "github.com/chrisdamba/simstreamdata/pkg/simulator"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -19,22 +20,28 @@ var rootCmd = &cobra.Command{
     Use:   "simstreamdata",
     Short: "Simulates streaming data for media platforms",
     Long: `Simstreamdata is a CLI tool to simulate event streaming data from users interacting with a media platform like video or music streaming services.`,
-        Run: func(cmd *cobra.Command, args []string) {
-            cfg, err := config.LoadConfig(cfgFile)
-            if err != nil {
-                fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
-                os.Exit(1)
-            }
+    Run: func(cmd *cobra.Command, args []string) {
+        cfg, err := config.LoadConfig(cfgFile)
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+            os.Exit(1)
+        }
 
-            fmt.Println("Simulation started with the following configuration:")
-            v := reflect.ValueOf(cfg).Elem()
-            t := v.Type()
-            for i := 0; i < v.NumField(); i++ {
-                field := v.Field(i)
-                fmt.Printf("%s: %v\n", t.Field(i).Name, field.Interface())
-            }
-            // Add your simulation logic here or call a function that does it e.g., runSimulation() from pkg/simulator/simulator.go
-        },
+        fmt.Println("Simulation started with the following configuration:")
+        v := reflect.ValueOf(cfg).Elem()
+        t := v.Type()
+        for i := 0; i < v.NumField(); i++ {
+            field := v.Field(i)
+            fmt.Printf("%s: %v\n", t.Field(i).Name, field.Interface())
+        }
+        if err := viper.Unmarshal(&cfg); err != nil {
+            fmt.Fprintf(os.Stderr, "Failed to unmarshal configuration: %v\n", err)
+            os.Exit(1)
+        }
+
+        sim := simulator.NewSimulator(cfg)
+        sim.RunSimulation()
+    },
 }
 
 func init() {

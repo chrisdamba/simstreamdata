@@ -42,12 +42,29 @@ func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subsc
 }
 
 // NextEvent processes the next event based on the user's current state.
-func (u *User) NextEvent(rng *rand.Rand, config *config.Config) {
+// func (u *User) NextEvent(rng *rand.Rand, config *config.Config) {
+// 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
+// 		u.startNewSession(rng, config)
+// 	} else {
+// 		u.CurrentSession.IncrementEvent(rng, config)
+// 	}
+// }
+
+// NextEvent processes the next event for the user and returns the event data and any error encountered.
+func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (string, error) {
 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
-		u.startNewSession(rng, config)
+			u.startNewSession(rng, config)
 	} else {
-		u.CurrentSession.IncrementEvent(rng, config)
+			u.CurrentSession.IncrementEvent(rng, config)
 	}
+
+	// Serialize the current state of the user or the event data to JSON
+	eventData, err := json.Marshal(u.CurrentSession) // Assuming you want to serialize the session data
+	if err != nil {
+			return "", fmt.Errorf("error serializing event data: %w", err)
+	}
+
+	return string(eventData), nil
 }
 
 // startNewSession initializes a new session for the user.

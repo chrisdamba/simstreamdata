@@ -2,12 +2,14 @@ package simulator
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/chrisdamba/simstreamdata/pkg/config"
 	"github.com/chrisdamba/simstreamdata/pkg/models"
 )
@@ -32,6 +34,13 @@ type FileOutput struct {
 
 type ConsoleOutput struct{}
 
+func NewSimulator(cfg *config.Config) *Simulator {
+    return &Simulator{
+        Config: cfg,
+        Users:  []*models.User{},
+    }
+}
+
 func (f *FileOutput) WriteMessage(msg []byte) error {
     _, err := f.file.Write(msg)
     return err
@@ -52,7 +61,8 @@ func (c *ConsoleOutput) WriteMessage(msg []byte) error {
 
 func (sim *Simulator) determineOutputDestination(config *config.Config) OutputDestination {
     if config.KafkaEnabled {
-        producer, err := sarama.NewSyncProducer(config.KafkaBrokerList, nil) // Assuming 'Brokers' field
+        brokerList := strings.Split(config.KafkaBrokerList, ",") // Convert string to []string
+        producer, err := sarama.NewSyncProducer(brokerList, nil) // Assuming 'Brokers' field
         if err != nil {
             log.Fatalf("Failed to create Kafka producer: %s", err)
         }
@@ -126,7 +136,11 @@ func (sim *Simulator) weightedRandomSubscriptionType() models.SubscriptionType {
 func convertToPreferences(subscriptionChances []config.SubscriptionChance) []config.Preference {
     preferences := make([]config.Preference, len(subscriptionChances))
     for i, chance := range subscriptionChances {
-        preferences[i] = config.Preference(chance)
+        // Manually assigning the values and converting Chance to an integer weight if necessary.
+        preferences[i] = config.Preference{
+            Name: chance.Type,
+            Weight: int(chance.Chance * 100), // Assuming Chance is a percentage; adjust the scaling as needed.
+        }
     }
     return preferences
 }
@@ -170,17 +184,29 @@ func (sim *Simulator) selectRandomPreferences(items []config.Preference, count i
 }
 
 func (sim *Simulator) RunSimulation() {
-    sim.initializeUsers() // Initialize users as before
+    output := sim.determineOutputDestination(sim.Config)
+    defer func() {
+        if closer, ok := output.(io.Closer); ok {
+            closer.Close()
+        }
+    }()
 
-    // Ticker for simulation
-    ticker := time.NewTicker(1 * time.Second) 
+    sim.initializeUsers() // Setup initial user base for the simulation.
+
+    // Start the simulation timer
+    ticker := time.NewTicker(1 * time.Second)
     defer ticker.Stop()
 
     for range ticker.C {
-        output := sim.determineOutputDestination(sim.Config) // Get output destination once
-
         for _, user := range sim.Users {
-            user.NextEvent(sim.Config, output) // Let users generate events
+            eventMsg, err := user.NextEvent(rand.New(rand.NewSource(time.Now().UnixNano())), sim.Config)
+            if err != nil {
+                log.Printf("Error during event generation: %v", err)
+                continue
+            }
+            if err := output.WriteMessage([]byte(eventMsg)); err != nil {
+                log.Printf("Failed to write message: %v", err)
+            }
         }
     }
 }
