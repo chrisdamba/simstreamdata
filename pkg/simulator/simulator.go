@@ -224,8 +224,12 @@ func (sim *Simulator) RunSession(user *models.User) {
     // Simulate watching the video
     fmt.Printf("User %s is watching %s\n", user.ID, selectedVideo.PrimaryTitle)
 
-    // Check for the end of the video and decide next action
+    // Simulate the end of the video
+    fmt.Printf("User %s finished watching %s\n", user.ID, selectedVideo.PrimaryTitle)
+
+    // Decide next action after the video ends
     if user.DecidesToContinueWatching() {
+        // If continuing, select a new video
         selectedVideo = user.SelectVideo(sim.Config)
         user.CurrentSession.CurrentVideo = selectedVideo
         fmt.Printf("User %s continued to watch %s\n", user.ID, selectedVideo.PrimaryTitle)

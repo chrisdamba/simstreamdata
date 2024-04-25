@@ -12,9 +12,9 @@
       "program": "main.go",
       "args": [
           "--n-users",
-          "4",
+          "5",
           "--end-time",
-          "2024-04-25T14:40:00Z",
+          "2024-04-25T20:45:00Z",
           "--kafka-broker-list",
           "localhost:29092",
           "--kafka-topic",

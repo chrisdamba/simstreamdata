@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"reflect"
+	// "reflect"
 	"time"
 
 	// "time"
@@ -30,6 +30,11 @@ var rootCmd = &cobra.Command{
             os.Exit(1)
         }
 
+        err = cfg.InitializeVideos("data/title.basics.tsv.gz")
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "Error loading video data: %v", err)
+        }
+        /*
         fmt.Println("Simulation started with the following configuration:")
         v := reflect.ValueOf(cfg).Elem()
         t := v.Type()
@@ -37,6 +42,7 @@ var rootCmd = &cobra.Command{
             field := v.Field(i)
             fmt.Printf("%s: %v\n", t.Field(i).Name, field.Interface())
         }
+        */
         sim := simulator.NewSimulator(cfg)
         sim.RunSimulation()
     },

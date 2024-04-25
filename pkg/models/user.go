@@ -142,6 +142,7 @@ func (u *User) DecidesToContinueWatching() bool {
 }
 
 func (u *User) SelectVideo(config *config.Config) *config.Video {
+	/*
 	weightedVideos := make([]*config.Video, 0)
 	weights := make([]int, 0)
 
@@ -164,6 +165,15 @@ func (u *User) SelectVideo(config *config.Config) *config.Video {
 			return nil // No videos match the user's preferences
 	}
 	return weightedRandomSelect(weightedVideos, weights) // Make sure this function returns *config.Video
+	*/
+
+	// Directly reference a Video from config to see if the type is accessible
+	if len(config.AllVideos) > 0 {
+		// Randomly select a new video from the list
+		newVideo := config.AllVideos[rand.Intn(len(config.AllVideos))]
+		return &newVideo // Access the first video directly
+	}
+	return nil
 }
 
 // Implement weightedRandomSelect assuming it returns *config.Video
