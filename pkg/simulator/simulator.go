@@ -98,6 +98,9 @@ func (sim *Simulator) initializeUsers() {
         authLevel := sim.weightedRandomAuthLevel()
         subscriptionType := sim.weightedRandomSubscriptionType()
 
+        // Generate random genre preferences
+        genrePreferences := sim.generateRandomGenrePreferences()
+
         // Create new user
         startTime := sim.Config.StartTime.Add(time.Duration(i) * time.Minute)
         user := models.NewUser(
@@ -108,6 +111,7 @@ func (sim *Simulator) initializeUsers() {
             initialLevel,
             subscriptionType,
             stateMachine,
+            genrePreferences,
         )
 
         sim.AddSession(user)
@@ -129,6 +133,17 @@ func (sim *Simulator) weightedRandomInitialLevel() string {
 func (sim *Simulator) weightedRandomSubscriptionType() models.SubscriptionType {
     chosen := sim.selectRandomPreference(convertToPreferences(sim.Config.SubscriptionChances))
     return models.SubscriptionType(chosen.Name)
+}
+
+// generateRandomGenrePreferences generates a map of genres with randomized weights based on configured preferences
+func (sim *Simulator) generateRandomGenrePreferences() map[string]int {
+    genreMap := make(map[string]int)
+    for _, genre := range sim.Config.Genres {
+        // Randomize genre weight: here we simulate user preference strength by multiplying the base weight by a random factor
+        randomFactor := rand.Intn(10) + 1  // Random factor between 1 and 10
+        genreMap[genre.Name] = genre.Weight * randomFactor
+    }
+    return genreMap
 }
 
 func convertToPreferences(subscriptionChances []config.SubscriptionChance) []config.Preference {
@@ -200,6 +215,26 @@ func (s *Simulator) pickContentType() string {
     return "audio" // default if something goes wrong
 }
 
+func (sim *Simulator) RunSession(user *models.User) {
+
+    // Selecting a video at the start of the session
+    selectedVideo := user.SelectVideo(sim.Config)
+    user.CurrentSession.CurrentVideo = selectedVideo
+
+    // Simulate watching the video
+    fmt.Printf("User %s is watching %s\n", user.ID, selectedVideo.PrimaryTitle)
+
+    // Check for the end of the video and decide next action
+    if user.DecidesToContinueWatching() {
+        selectedVideo = user.SelectVideo(sim.Config)
+        user.CurrentSession.CurrentVideo = selectedVideo
+        fmt.Printf("User %s continued to watch %s\n", user.ID, selectedVideo.PrimaryTitle)
+    } else {
+        fmt.Printf("User %s ended their session.\n", user.ID)
+    }
+}
+
+
 // RunSimulation starts the simulation process.
 func (sim *Simulator) RunSimulation() {
     output := sim.determineOutputDestination(sim.Config)
@@ -238,8 +273,10 @@ func (sim *Simulator) RunSimulation() {
                 user.CurrentSession = models.NewSession(user.ID.String(), user.StateMachine, user.SubscriptionType, 0, user.StartTime, rng, sim.Config)
             }
 
-            // Process the next event in the current session
+            // Run a session handling logic
+            sim.RunSession(user)
 
+            // Process the next event in the current session
             eventMsg, err := user.NextEvent(rand.New(rand.NewSource(currentUTC.UnixNano())), sim.Config)
             if err != nil {
                 log.Printf("Error during event generation: %v", err)

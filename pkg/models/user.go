@@ -18,18 +18,19 @@ type User struct {
 	StartTime        time.Time
 	StateMachine    *StateMachine
 	Auth             string
+	InitialLevel     string
 	Properties       map[string]interface{}
 	Device           map[string]interface{}
-	InitialLevel     string
 	PreferredGenres  []string
 	FavoriteShows    []string
+	GenrePreferences map[string]int // weight for each genre
 	ViewingHours     int
 	SubscriptionType SubscriptionType
 	CurrentSession   *Session
 }
 
 // NewUser creates a new User instance.
-func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subscriptionType SubscriptionType, stateMachine *StateMachine) *User {
+func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subscriptionType SubscriptionType, stateMachine *StateMachine, genres map[string]int) *User {
 	return &User{
 		ID:               uuid.New(),
 		Alpha:            alpha,
@@ -41,6 +42,7 @@ func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subsc
 		StateMachine: stateMachine,
 		Properties:       make(map[string]interface{}),
 		Device:           make(map[string]interface{}),
+		GenrePreferences: genres, 
 	}
 }
 
@@ -103,6 +105,9 @@ func (u *User) Serialize() string {
 		"eventType": 					u.CurrentSession.NextEventType,
 		"sessionDuration": 		time.Since(u.CurrentSession.StartTime).Minutes(),
 		"adsShown": 					u.CurrentSession.CurrentAd != nil,
+		"videoID":     				u.CurrentSession.CurrentVideo.ID,
+		"title":        			u.CurrentSession.CurrentVideo.PrimaryTitle,
+		"duration":     			u.CurrentSession.CurrentVideo.RuntimeMinutes.String(),
 
 	}
 
@@ -112,6 +117,72 @@ func (u *User) Serialize() string {
 		return "{}"
 	}
 	return string(jsonData)
+}
+
+// AdjustGenrePreferences updates the user's preferences based on the genres of the recently watched video.
+func (u *User) AdjustGenrePreferences(watchedVideo *config.Video) {
+	for _, genre := range watchedVideo.Genres {
+			if _, exists := u.GenrePreferences[genre]; exists {
+					u.GenrePreferences[genre] += 1 // Increment preference weight for each watched genre
+			} else {
+					u.GenrePreferences[genre] = 1 // Set initial preference if genre is new to the user
+			}
+	}
+}
+
+// Update preferences after a video is watched
+func (u *User) WatchVideo(video *config.Video) {
+	u.AdjustGenrePreferences(video)
+	// Additional logic for handling the watch event
+}
+
+func (u *User) DecidesToContinueWatching() bool {
+	// Simulate the decision process, could use randomness or user preferences
+	return rand.Float32() < 0.8 // 80% chance to continue watching
+}
+
+func (u *User) SelectVideo(config *config.Config) *config.Video {
+	weightedVideos := make([]*config.Video, 0)
+	weights := make([]int, 0)
+
+	// Create a weighted list of videos based on user's genre preferences
+	for _, v := range config.AllVideos {
+			genreWeight := 0
+			for _, genre := range v.Genres {
+					if weight, ok := u.GenrePreferences[genre]; ok {
+							genreWeight += weight
+					}
+			}
+			if genreWeight > 0 { // Only consider videos that match the user's genre preferences
+					weightedVideos = append(weightedVideos, &v) // Note the address of v here
+					weights = append(weights, genreWeight)
+			}
+	}
+
+	// Perform weighted random selection
+	if len(weightedVideos) == 0 {
+			return nil // No videos match the user's preferences
+	}
+	return weightedRandomSelect(weightedVideos, weights) // Make sure this function returns *config.Video
+}
+
+// Implement weightedRandomSelect assuming it returns *config.Video
+func weightedRandomSelect(videos []*config.Video, weights []int) *config.Video {
+	// Your weighted selection logic here
+	totalWeight := 0
+	for _, weight := range weights {
+			totalWeight += weight
+	}
+
+	r := rand.Intn(totalWeight)
+	for i, weight := range weights {
+			r -= weight
+			if r <= 0 {
+					return videos[i]
+			}
+	}
+
+	return nil // In case something goes wrong
 }
 
 

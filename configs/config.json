@@ -16,7 +16,24 @@
   "genres": [
     {"name": "Action", "weight": 20},
     {"name": "Drama", "weight": 30},
-    {"name": "Comedy", "weight": 50}
+    {"name": "Comedy", "weight": 50},
+    {"name": "Adventure", "weight": 25},
+    {"name": "Romance", "weight": 40},
+    {"name": "Science Fiction", "weight": 35},
+    {"name": "Horror", "weight": 15},
+    {"name": "Thriller", "weight": 20},
+    {"name": "Mystery", "weight": 20},
+    {"name": "Crime", "weight": 25},
+    {"name": "Animation", "weight": 10},
+    {"name": "Family", "weight": 15},
+    {"name": "Fantasy", "weight": 30},
+    {"name": "Historical", "weight": 10},
+    {"name": "Documentary", "weight": 5},
+    {"name": "Music", "weight": 10},
+    {"name": "War", "weight": 8},
+    {"name": "Biography", "weight": 12},
+    {"name": "Sport", "weight": 7},
+    {"name": "Western", "weight": 6}
   ],
   "shows": [
     {"name": "Show 1", "weight": 10},

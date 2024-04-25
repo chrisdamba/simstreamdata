@@ -1,7 +1,12 @@
 package config
 
 import (
+	"bufio"
+	"compress/gzip"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mitchellh/mapstructure"
@@ -72,6 +77,19 @@ type SubscriptionChance struct {
 	Type  string  `mapstructure:"type"`
 	Chance float64 `mapstructure:"chance"`
 }
+
+type Video struct {
+	ID             string
+	TitleType      string
+	PrimaryTitle   string
+	OriginalTitle  string
+	IsAdult        bool
+	StartYear      string
+	EndYear        string
+	RuntimeMinutes time.Duration
+	Genres         []string
+}
+
 type Config struct {
 	Seed                 int64                `mapstructure:"seed"`
 	Alpha                float64              `mapstructure:"alpha"`
@@ -96,6 +114,7 @@ type Config struct {
 	SubscriptionChances  []SubscriptionChance `mapstructure:"subscription-chances"`
 	NewSessionPages      []SessionPage    		`mapstructure:"new-session"`
 	Transitions      		 []Transition 				`mapstructure:"transitions"`	
+	AllVideos 					 []Video 							`mapstructure:"all-videos"` // List of all videos loaded from IMDb
 
 	SimulateVideo     		bool          			`mapstructure:"simulate-video"` 
 	AttritionRate     		float64       			`mapstructure:"attrition-rate"`
@@ -142,3 +161,59 @@ func LoadConfig(cfgFile string) (*Config, error) {
 	return &config, nil
 }
 
+func LoadVideosFromIMDb(filename string) ([]Video, error) {
+    file, err := os.Open(filename)
+    if err != nil {
+        return nil, err
+    }
+    defer file.Close()
+
+    gz, err := gzip.NewReader(file)
+    if err != nil {
+        return nil, err
+    }
+    defer gz.Close()
+
+    scanner := bufio.NewScanner(gz)
+    videos := []Video{}
+
+    // Skip header line
+    scanner.Scan()
+
+    for scanner.Scan() {
+        line := scanner.Text()
+        parts := strings.Split(line, "\t")
+
+        runtimeMinutes, _ := strconv.Atoi(parts[7])
+        genres := strings.Split(parts[8], ",")
+
+        video := Video{
+            ID:             parts[0],
+            TitleType:      parts[1],
+            PrimaryTitle:   parts[2],
+            OriginalTitle:  parts[3],
+            IsAdult:        parts[4] == "1",
+            StartYear:      parts[5],
+            EndYear:        parts[6],
+            RuntimeMinutes: time.Duration(runtimeMinutes) * time.Minute,
+            Genres:         genres,
+        }
+        videos = append(videos, video)
+    }
+
+    if err := scanner.Err(); err != nil {
+        return nil, err
+    }
+    return videos, nil
+}
+
+
+// Add a method to the Config struct to load videos into it
+func (c *Config) InitializeVideos(filePath string) error {
+	videos, err := LoadVideosFromIMDb(filePath)
+	if err != nil {
+			return err
+	}
+	c.AllVideos = videos
+	return nil
+}

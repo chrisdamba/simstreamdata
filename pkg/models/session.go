@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
 
@@ -12,7 +13,7 @@ type ContentType string
 
 const (
     Audio   ContentType = "audio"
-    Video   ContentType = "video"
+    VideoType   ContentType = "video"
 )
 
 type SubscriptionType string
@@ -49,6 +50,8 @@ type Session struct {
 
     CurrentContent  *Content  
     CurrentAd       *Ad 
+    CurrentVideo    *config.Video
+    VideoEndTime    time.Time
     
     // State tracking
     NextEventTime   time.Time
@@ -122,7 +125,7 @@ func (s *Session) handleContent() {
 		nextDuration := time.Duration(s.Rng.ExpFloat64()*float64(s.Config.Alpha)) * time.Second
 		s.scheduleNextEventAt("song", nextDuration)
 	}
-	if s.CurrentState.Page == "PlayVideo" && s.CurrentContent != nil && s.CurrentContent.Type == Video {
+	if s.CurrentState.Page == "PlayVideo" && s.CurrentContent != nil && s.CurrentContent.Type == VideoType {
 		// Check and handle mid-roll ad insertion
 		if s.shouldInsertMidRollAd(s.Config) {
 			s.startAdSequence("mid-roll")
@@ -164,7 +167,7 @@ func (s *Session) handleAdEvent() {
 func (s *Session) handleContentEvent(rng *rand.Rand, config *config.Config) {
     if s.CurrentContent.Type == Audio {
         s.handleNextAudioEvent(rng, config)
-    } else if s.CurrentContent.Type == Video {
+    } else if s.CurrentContent.Type == VideoType {
         if shouldInsertAd(s, config) {
             s.startAdSequence("video")
         } else {
@@ -246,7 +249,7 @@ func (s *Session) scheduleNextEventAt(eventType string, duration time.Duration) 
 // shouldInsertAd decides if an ad should be inserted at any point in the video content.
 func shouldInsertAd(s *Session, config *config.Config) bool {
     // Directly return false if the session is not eligible for ads.
-    if s.SubscriptionTier != Free || s.CurrentContent.Type != Video {
+    if s.SubscriptionTier != Free || s.CurrentContent.Type != VideoType {
         return false // No ads for non-free users or for non-video content.
     }
 
@@ -295,4 +298,52 @@ func (s *Session) IsDone() bool {
 
 func (s *Session) MarkAsFinished() {
     s.Finished = true
+}
+
+// StartVideo initiates the playback of a video within the session.
+func (s *Session) StartVideo(video *config.Video) {
+    s.CurrentVideo = video
+    // Calculate the video end time based on the runtime minutes of the video
+    s.VideoEndTime = time.Now().Add(video.RuntimeMinutes * time.Minute)
+
+    // Logging video start for monitoring or debugging
+    log.Printf("Video %s started in session %s, ends at %s", video.PrimaryTitle, s.ID, s.VideoEndTime.Format(time.RFC3339))
+}
+
+// CheckVideoProgress checks if the current video has finished playing.
+func (s *Session) CheckVideoProgress() {
+    // Check if there's a current video and the current time is past the video end time
+    if s.CurrentVideo != nil && time.Now().After(s.VideoEndTime) {
+        log.Printf("Video %s ended in session %s", s.CurrentVideo.PrimaryTitle, s.ID)
+
+        // Video has ended, clear the current video
+        s.CurrentVideo = nil
+
+        // Handle next steps based on the session's logic
+        s.decideNextSteps()
+    }
+}
+
+// decideNextSteps decides what happens after a video ends.
+func (s *Session) decideNextSteps() {
+    if rand.Float64() < 0.5 { // 50% chance to pick a new video or end session
+        videos := s.Config.AllVideos
+        if len(videos) > 0 {
+            // Randomly select a new video from the list
+            newVideo := videos[rand.Intn(len(videos))]
+            s.StartVideo(&newVideo)
+        } else {
+            // No videos available, end session
+            s.EndSession()
+        }
+    } else {
+        // Simulate ending the session
+        s.EndSession()
+    }
+}
+
+// EndSession handles the session closure.
+func (s *Session) EndSession() {
+    log.Printf("Session %s ended", s.ID)
+    // Clean up session resources or log session completion
 }
