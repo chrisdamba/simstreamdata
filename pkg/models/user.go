@@ -16,7 +16,7 @@ type User struct {
 	Alpha            float64
 	Beta             float64
 	StartTime        time.Time
-	InitialStates    map[string]*WeightedRandomThingGenerator[*State] // Keyed by auth and level
+	StateMachine    *StateMachine
 	Auth             string
 	Properties       map[string]interface{}
 	Device           map[string]interface{}
@@ -29,7 +29,7 @@ type User struct {
 }
 
 // NewUser creates a new User instance.
-func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subscriptionType SubscriptionType) *User {
+func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subscriptionType SubscriptionType, stateMachine *StateMachine) *User {
 	return &User{
 		ID:               uuid.New(),
 		Alpha:            alpha,
@@ -38,7 +38,7 @@ func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subsc
 		Auth:             auth,
 		InitialLevel:     level,
 		SubscriptionType: subscriptionType,
-		InitialStates:    make(map[string]*WeightedRandomThingGenerator[*State]),
+		StateMachine: stateMachine,
 		Properties:       make(map[string]interface{}),
 		Device:           make(map[string]interface{}),
 	}
@@ -58,7 +58,7 @@ func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (string, error) 
 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
 			u.startNewSession(rng, config)
 	} else {
-			u.CurrentSession.IncrementEvent(rng, config)
+			u.CurrentSession.IncrementEvent()
 	}
 
 	// Serialize the current state of the user or the event data to JSON
@@ -77,30 +77,18 @@ func (u *User) startNewSession(rng *rand.Rand, config *config.Config) {
 			panic("no session pages available in configuration")
 	}
 
-	// Select a random session page from the configuration
-	randomIndex := rng.Intn(len(config.NewSessionPages))
-	page := config.NewSessionPages[randomIndex]
-
-	// Create a new state based on the randomly selected session page
-	state := &State{
-			Page:       page.Page,
-			StatusCode: page.Status,
-			Method:     page.Method,
-			UserLevel:  page.Level,
-			AuthStatus: page.Auth,
-	}
 
 	// Assume a default engagement level, or compute it based on some logic
 	engagementLevel := 0  // Placeholder for actual logic
 
 	// Create a new session with the selected state
-	u.CurrentSession = NewSession(u.ID.String(), state, u.SubscriptionType, engagementLevel, u.StartTime)
+	u.CurrentSession = NewSession(u.ID.String(), u.StateMachine, u.SubscriptionType, engagementLevel, u.StartTime, rng, config)
 }
 
 // Serialize serializes the user's current state to a JSON string for logging.
 func (u *User) Serialize() string {
 	data := map[string]interface{}{
-		"ts":              u.CurrentSession.CurrentState.CurrentEventTime.UnixMilli(),  // UNIX milliseconds 
+		"ts":              u.CurrentSession.CurrentState.EventTime.UnixMilli(),  // UNIX milliseconds 
 		"userId":          u.ID.String(),
 		"sessionId":       u.CurrentSession.ID,
 		"page":            u.CurrentSession.CurrentState.Page,

@@ -60,10 +60,18 @@ type Session struct {
     SubscriptionTier SubscriptionType
     EngagementLevel  int
     Finished         bool
+    Rng             *rand.Rand
+	Config          *config.Config
 }
 
-func NewSession(userID string, state *State, subscriptionTier SubscriptionType, engagementLevel int, startTime time.Time) *Session {
+func NewSession(userID string, stateMachine *StateMachine, subscriptionTier SubscriptionType, engagementLevel int, startTime time.Time, rng *rand.Rand, config *config.Config) *Session {
     sessionID := fmt.Sprintf("%s-%d", userID, time.Now().UnixNano())
+
+    // Calculate the initial next event time.
+    // Here we assume the initial delay for the next event is between 1 to 5 minutes.
+    initialDelay := time.Duration(rng.Intn(5)+1) * time.Minute
+    nextEventTime := startTime.Add(initialDelay)
+
     return &Session{
         ID: sessionID,
         UserID: userID,
@@ -71,52 +79,96 @@ func NewSession(userID string, state *State, subscriptionTier SubscriptionType, 
         EngagementLevel: engagementLevel,
         StartTime: startTime,
         LastEvent: startTime,
-        CurrentState: state,
+        CurrentState: stateMachine.CurrentState,
+        StateMachine: stateMachine,
+        NextEventTime: nextEventTime,
+		Rng: rng,
+		Config: config,
     }
 }
 
-func (s *Session) IncrementEvent(rng *rand.Rand, config *config.Config) {
+func (s *Session) IncrementEvent() {
     now := time.Now()
 
-    // Continue with the next event if the current time is past the next event time
-    if now.After(s.NextEventTime) {
-        switch s.NextEventType {
-        case "Content":
-            if s.CurrentContent != nil {
-                s.handleContentEvent(rng, config)
-            }
-        case "AdStart", "AdImpression", "AdComplete":
-            if s.CurrentAd != nil {
-                s.handleAdEvent(rng, config)
-            }
-        }
-    }
-
-    // Determine the next event based on the current state
-    if s.CurrentContent != nil && (now.After(s.NextEventTime) || s.NextEventType == "Content") {
-        if s.CurrentContent.Type == Audio {
-            // Handle next song
-            s.handleNextAudioEvent(rng, config)
-        } else if s.CurrentContent.Type == Video {
-            // Handle video playback and check for ads
-            s.handleNextVideoEvent(rng, config)
-        }
-    } else if s.CurrentAd != nil {
-        // Handle ad-related transitions
-        s.handleAdEvent(rng, config)
-    }
-
-
+    	// Check if it's time for the next event
+	if now.After(s.NextEventTime) {
+		nextState := s.CurrentState.GetNextState(s.Rng)
+		if nextState == nil {
+			s.Finished = true // No more transitions available
+			return
+		}
+		s.handleTransition(nextState)
+	}
 }
+
+// handleTransition updates session based on the state transition
+func (s *Session) handleTransition(nextState *State) {
+	s.CurrentState = nextState
+
+	switch s.CurrentState.Page {
+	case "PlayVideo", "NextSong":
+		s.handleContent()
+	case "AdStart", "AdImpression", "AdEnd":
+		s.handleAdEvent()
+	default:
+		s.scheduleNextEvent("generic")
+	}
+}
+
+// handleContent simulates handling different content types
+func (s *Session) handleContent() {
+	if s.CurrentState.Page == "NextSong" && s.CurrentContent != nil && s.CurrentContent.Type == Audio {
+		// Simulate time till next song
+		nextDuration := time.Duration(s.Rng.ExpFloat64()*float64(s.Config.Alpha)) * time.Second
+		s.scheduleNextEventAt("song", nextDuration)
+	}
+	if s.CurrentState.Page == "PlayVideo" && s.CurrentContent != nil && s.CurrentContent.Type == Video {
+		// Check and handle mid-roll ad insertion
+		if s.shouldInsertMidRollAd(s.Config) {
+			s.startAdSequence("mid-roll")
+			return
+		}
+		nextDuration := time.Duration(s.Rng.ExpFloat64()*float64(s.Config.Alpha)) * time.Second
+		s.scheduleNextEventAt("video content", nextDuration)
+	}
+}
+
+// handleAdEvent manages transitions related to advertising
+func (s *Session) handleAdEvent() {
+	// Define ad handling logic
+	switch s.NextEventType {
+    case "AdStart":
+        // Move to AdImpression
+        s.CurrentAd.StartTime = time.Now()
+        s.NextEventType = "AdImpression"
+        s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(10)+1) * time.Second) // Ad impressions occur shortly after ad starts
+    case "AdImpression":
+        // Move to AdComplete or next AdImpression
+        if s.Rng.Float64() < 0.8 { // 80% chance to go to next impression
+            s.NextEventType = "AdImpression"
+            s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(10)+1) * time.Second)
+        } else {
+            s.NextEventType = "AdComplete"
+            s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(5)+1) * time.Second)
+        }
+    case "AdComplete":
+        // Finish the ad sequence and resume content
+        s.CurrentAd = nil
+        s.NextEventType = "Content"
+        s.scheduleNextEvent("resume content")
+	}
+	s.scheduleNextEvent(s.NextEventType)
+}
+
 
 func (s *Session) handleContentEvent(rng *rand.Rand, config *config.Config) {
     if s.CurrentContent.Type == Audio {
         s.handleNextAudioEvent(rng, config)
     } else if s.CurrentContent.Type == Video {
         if shouldInsertAd(s, config) {
-            s.startAdSequence("video", rng, config)
+            s.startAdSequence("video")
         } else {
-            s.scheduleNextEvent("video content", rng, config)
+            s.scheduleNextEvent("video content")
         }
     }
 }
@@ -126,10 +178,10 @@ func (s *Session) handleNextAudioEvent(rng *rand.Rand, config *config.Config) {
     if s.SubscriptionTier == Free {
         // Check probability for an ad after a song
         if rng.Float64() < config.AdConfig.AudioAdFrequency {
-            s.startAdSequence("audio", rng, config)
+            s.startAdSequence("audio")
         }
     }
-    s.scheduleNextEvent("song", rng, config)
+    s.scheduleNextEvent("song")
 }
 
 func (s *Session) handleNextVideoEvent(rng *rand.Rand, config *config.Config) {
@@ -137,49 +189,26 @@ func (s *Session) handleNextVideoEvent(rng *rand.Rand, config *config.Config) {
 
     // Check for pre-roll ad first
     if currentTime < config.AdConfig.PreRollCooldown && s.shouldInsertPreRollAd(config) {
-        s.startAdSequence("pre-roll", rng, config)
+        s.startAdSequence("pre-roll")
         return
     }
 
     // Check for mid-roll ads
     if s.shouldInsertMidRollAd(config) {
-        s.startAdSequence("mid-roll", rng, config)
+        s.startAdSequence("mid-roll")
         return
     }
 
     // If no ads are to be inserted, schedule the next content event
-    s.scheduleNextEvent("video content", rng, config)
+    s.scheduleNextEvent("video content")
 }
 
-func (s *Session) handleAdEvent(rng *rand.Rand, config *config.Config) {
-    // Logic for transitioning from one ad-related event to the next
-    switch s.NextEventType {
-    case "AdStart":
-        // Move to AdImpression
-        s.CurrentAd.StartTime = time.Now()
-        s.NextEventType = "AdImpression"
-        s.NextEventTime = time.Now().Add(time.Duration(rng.Intn(10)+1) * time.Second) // Ad impressions occur shortly after ad starts
-    case "AdImpression":
-        // Move to AdComplete or next AdImpression
-        if rng.Float64() < 0.8 { // 80% chance to go to next impression
-            s.NextEventType = "AdImpression"
-            s.NextEventTime = time.Now().Add(time.Duration(rng.Intn(10)+1) * time.Second)
-        } else {
-            s.NextEventType = "AdComplete"
-            s.NextEventTime = time.Now().Add(time.Duration(rng.Intn(5)+1) * time.Second)
-        }
-    case "AdComplete":
-        // Finish the ad sequence and resume content
-        s.CurrentAd = nil
-        s.NextEventType = "Content"
-        s.scheduleNextEvent("resume content", rng, config)
-    }
-}
+
 
 // startAdSequence initializes an ad sequence based on the ad type (pre-roll or mid-roll).
-func (s *Session) startAdSequence(adType string, rng *rand.Rand, config *config.Config) {
+func (s *Session) startAdSequence(adType string) {
 	// Generate an ad ID and determine the ad duration based on type.
-	adID := fmt.Sprintf("Ad-%d", rng.Int())
+	adID := fmt.Sprintf("Ad-%d", s.Rng.Int())
 	adDuration := 30 * time.Second // Simplified example: 30-second ads
 
 	// Update the session to reflect the ad start.
@@ -199,11 +228,18 @@ func (s *Session) startAdSequence(adType string, rng *rand.Rand, config *config.
 }
 
 
-func (s *Session) scheduleNextEvent(eventType string, rng *rand.Rand, _ *config.Config) {
-    // Calculate the next event time based on content or ad logic
-    interval := time.Duration(rng.Intn(5)+1) * time.Minute // Random interval between events
-    s.NextEventTime = time.Now().Add(interval)
-    s.NextEventType = eventType
+
+// scheduleNextEvent schedules the next event based on the event type
+func (s *Session) scheduleNextEvent(eventType string) {
+	interval := time.Duration(s.Rng.Intn(5)+1) * time.Minute
+	s.NextEventTime = time.Now().Add(interval)
+	s.NextEventType = eventType
+}
+
+// scheduleNextEventAt schedules the next event at a specific time interval
+func (s *Session) scheduleNextEventAt(eventType string, duration time.Duration) {
+	s.NextEventTime = time.Now().Add(duration)
+	s.NextEventType = eventType
 }
 
 

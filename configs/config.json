@@ -9,8 +9,6 @@
   "session-gap": 1800,
   "start-date": "2024-04-18T00:00:00Z",
   "end-date": "2024-04-25T00:00:00Z",
-  "start-time": "2024-04-18T19:34:45Z",
-  "end-time": "2024-04-25T00:00:00Z",
   "n-users": 5000,
   "first-user-id": 1,
   "growth-rate": 0.05,

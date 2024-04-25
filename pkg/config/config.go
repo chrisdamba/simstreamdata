@@ -108,6 +108,9 @@ func LoadConfig(cfgFile string) (*Config, error) {
 
 	viper.AutomaticEnv() // Read in environment variables that match
 
+	// Set default for start time as the current time if not provided
+	viper.SetDefault("start-time", time.Now().Format(time.RFC3339))
+
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("error reading config file: %w", err)
 	}

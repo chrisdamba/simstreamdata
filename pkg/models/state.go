@@ -6,34 +6,66 @@ import (
 )
 
 type State struct {
-    Page         			string
-    StatusCode   			int
-		Method       			string
-    UserLevel    			string
-    AuthStatus   			string
-    ShowDetails  			bool
-		CurrentEventTime 	time.Time
+	Page          string
+	StatusCode    int
+	Method        string
+	UserLevel     string
+	AuthStatus    string
+	Transitions   []Transition
+	EventTime 	  time.Time
 }
 
 type Transition struct {
-    From     *State
-    To       *State
-    Probability float64
+	State       *State
+	Probability float64
 }
 
 type StateMachine struct {
-	States          map[string]*State // Using a map with state names as keys
-	Transitions 		map[*State][]Transition
-	CurrentState    *State // Track the current active state
+	States       []*State
+	CurrentState *State
 }
 
 func NewStateMachine() *StateMachine {
-	return &StateMachine{
-		States:      make(map[string]*State),
-		Transitions: make(map[*State][]Transition),
-	}
+	return &StateMachine{}
 }
 
+func (sm *StateMachine) AddState(state *State) {
+	sm.States = append(sm.States, state)
+}
+
+func (s *State) AddTransition(target *State, probability float64) {
+	s.Transitions = append(s.Transitions, Transition{State: target, Probability: probability})
+}
+
+func (s *State) GetNextState(rng *rand.Rand) *State {
+	if len(s.Transitions) == 0 {
+		return nil
+	}
+	p := rng.Float64()
+	total := 0.0
+	for _, t := range s.Transitions {
+		total += t.Probability
+		if p < total {
+			return t.State
+		}
+	}
+	return nil // Return nil if no transition is found (or default state)
+}
+
+func InitializeStates() *StateMachine {
+	sm := NewStateMachine()
+	home := &State{Page: "Home", StatusCode: 200, Method: "GET", UserLevel: "free", AuthStatus: "Logged In", EventTime: time.Now()}
+	playVideo := &State{Page: "PlayVideo", StatusCode: 200, Method: "PUT", UserLevel: "free", AuthStatus: "Logged In", EventTime: time.Now()}
+
+	sm.AddState(home)
+	sm.AddState(playVideo)
+
+	home.AddTransition(playVideo, 0.8) // 80% probability to transition from Home to PlayVideo
+	playVideo.AddTransition(home, 0.5) // 50% probability to return to Home
+
+	return sm
+}
+/*
 func initializeStates() *StateMachine {
 	sm := NewStateMachine()
 	// Define example states
@@ -56,35 +88,4 @@ func initializeStates() *StateMachine {
 
 	return sm
 }
-
-func (sm *StateMachine) AddState(state *State) {
-	sm.States[state.Page] = state
-}
-
-func (sm *StateMachine) AddTransition(from, to *State, probability float64) {
-	sm.Transitions[from] = append(sm.Transitions[from], Transition{From: from, To: to, Probability: probability})
-}
-
-func (sm *StateMachine) GetNextState(current *State) *State {
-	transitions := sm.Transitions[current]
-	sum := 0.0
-	for _, transition := range transitions {
-			sum += transition.Probability
-	}
-	randVal := rand.Float64() * sum
-	cumulative := 0.0
-	for _, transition := range transitions {
-			cumulative += transition.Probability
-			if randVal < cumulative {
-					return transition.To
-			}
-	}
-	return nil // Or default state
-}
-
-// Helper for convenient transition setup
-func (sm *StateMachine) ConnectStates(fromName, toName string, probability float64) {
-    fromState := sm.States[fromName]
-    toState := sm.States[toName]
-    sm.AddTransition(fromState, toState, probability)
-}
+*/

@@ -1,7 +1,6 @@
 package simulator
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"math/rand"
@@ -26,6 +25,7 @@ type KafkaOutput struct {
 type Simulator struct {
     Config *config.Config
     Users  []*models.User
+    StateMachine *models.StateMachine
 }
 
 type FileOutput struct {
@@ -93,6 +93,7 @@ func randomLogNormal(mean, stddev float64) float64 {
 }
 
 func (sim *Simulator) initializeUsers() {
+    stateMachine := models.InitializeStates() // Initialize a state machine for all users (or per user if different)
     for i := 0; i < sim.Config.NUsers; i++ {
         // Generate random preferences based on weighted selections
         initialLevel := sim.weightedRandomInitialLevel()
@@ -110,6 +111,7 @@ func (sim *Simulator) initializeUsers() {
             authLevel,
             initialLevel,
             subscriptionType,
+            stateMachine,
         )
 
         sim.AddSession(user)
@@ -183,33 +185,8 @@ func (sim *Simulator) selectRandomPreferences(items []config.Preference, count i
     return selected
 }
 
-func (sim *Simulator) RunSimulation() {
-    output := sim.determineOutputDestination(sim.Config)
-    defer func() {
-        if closer, ok := output.(io.Closer); ok {
-            closer.Close()
-        }
-    }()
-
-    sim.initializeUsers() // Setup initial user base for the simulation.
-
-    // Start the simulation timer
-    ticker := time.NewTicker(1 * time.Second)
-    defer ticker.Stop()
-
-    for range ticker.C {
-        for _, user := range sim.Users {
-            eventMsg, err := user.NextEvent(rand.New(rand.NewSource(time.Now().UnixNano())), sim.Config)
-            if err != nil {
-                log.Printf("Error during event generation: %v", err)
-                continue
-            }
-            if err := output.WriteMessage([]byte(eventMsg)); err != nil {
-                log.Printf("Failed to write message: %v", err)
-            }
-        }
-    }
-}
+// Simulation constants
+const eventRateCalcInterval = 10 * time.Second
 
 func (s *Simulator) pickContentType() string {
     totalWeight := 0
@@ -227,39 +204,56 @@ func (s *Simulator) pickContentType() string {
     return "audio" // default if something goes wrong
 }
 
-func (s *Simulator) handleVideoAds() {
-    // Process video ads based on configuration
-    for _, ad := range s.Config.AdConfig.AdEvents {
-        if rand.Float64() < float64(ad.Weight) {
-            // Log or handle ad event
+// RunSimulation starts the simulation process.
+func (sim *Simulator) RunSimulation() {
+    output := sim.determineOutputDestination(sim.Config)
+    defer func() {
+        if closer, ok := output.(io.Closer); ok {
+            closer.Close()
+        }
+    }()
+
+    sim.initializeUsers() // Setup initial user base for the simulation.
+    log.Printf("Initial number of users: %d\n", sim.Config.NUsers)
+    log.Printf("Simulation starts from %s to %s\n", sim.Config.StartTime.Format(time.RFC3339), sim.Config.EndTime.Format(time.RFC3339))
+
+    // Start the simulation timer
+    ticker := time.NewTicker(1 * time.Second)
+    defer ticker.Stop()
+
+    // Initialize variables for progress tracking
+    var (
+        eventsCount    int
+        lastReportTime = time.Now()
+    )
+        
+    for currentTime := range ticker.C {
+        for _, user := range sim.Users {
+            // Ensure that the session exists and is not done
+            if user.CurrentSession == nil || user.CurrentSession.IsDone() {
+                rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+                user.CurrentSession = models.NewSession(user.ID.String(), user.StateMachine, user.SubscriptionType, 0, user.StartTime, rng, sim.Config)
+            }
+
+            // Process the next event in the current session
+
+            eventMsg, err := user.NextEvent(rand.New(rand.NewSource(time.Now().UnixNano())), sim.Config)
+            if err != nil {
+                log.Printf("Error during event generation: %v", err)
+                continue
+            }
+            if err := output.WriteMessage([]byte(eventMsg)); err != nil {
+                log.Printf("Failed to write message: %v", err)
+            }
+            eventsCount++
+        }
+
+        // Calculate and display the rate of events
+        if time.Since(lastReportTime) >= eventRateCalcInterval {
+            rate := float64(eventsCount) / time.Since(lastReportTime).Seconds()
+            log.Printf("Time: %s, Events: %d, Rate: %.2f eps\n", currentTime.Format(time.RFC3339), eventsCount, rate)
+            eventsCount = 0
+            lastReportTime = time.Now()
         }
     }
-}
-
-func (sim *Simulator) determineAuthLevel() string {
-    // Randomly determine auth level; this is simplified, expand as needed
-    authLevels := []string{"Guest", "Logged In", "Logged Out"}
-    return authLevels[rand.Intn(len(authLevels))]
-}
-
-
-func newKafkaProducer(brokerList []string) (sarama.SyncProducer, func(), error) {
-    config := sarama.NewConfig()
-    config.Producer.RequiredAcks = sarama.WaitForAll          // Ensure data is written to all replicas
-    config.Producer.Retry.Max = 10                            // Retry up to 10 times to produce messages
-    config.Producer.Return.Successes = true
-
-    producer, err := sarama.NewSyncProducer(brokerList, config)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to start Sarama producer: %w", err)
-    }
-
-    // Cleanup function to close the producer
-    cleanup := func() {
-        if err := producer.Close(); err != nil {
-            log.Printf("Failed to close Kafka producer: %s", err)
-        }
-    }
-
-    return producer, cleanup, nil
 }
