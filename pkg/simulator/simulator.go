@@ -1,6 +1,7 @@
 package simulator
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"math/rand"
@@ -47,6 +48,9 @@ func (f *FileOutput) WriteMessage(msg []byte) error {
 }
 
 func (k *KafkaOutput) WriteMessage(msg []byte) error {
+    if k.producer == nil {
+        return fmt.Errorf("Kafka producer is closed")
+    }
     _, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
         Topic: k.topic,
         Value: sarama.ByteEncoder(msg),
@@ -54,22 +58,21 @@ func (k *KafkaOutput) WriteMessage(msg []byte) error {
     return err
 }
 
+
 func (c *ConsoleOutput) WriteMessage(msg []byte) error {
     _, err := os.Stdout.Write(msg)
     return err
 }
 
+// Ensure producer is closed properly after all messages are sent
 func (sim *Simulator) determineOutputDestination(config *config.Config) OutputDestination {
     if config.KafkaEnabled {
-        brokerList := strings.Split(config.KafkaBrokerList, ",") // Convert string to []string
-        producer, err := sarama.NewSyncProducer(brokerList, nil) // Assuming 'Brokers' field
+        brokerList := strings.Split(config.KafkaBrokerList, ",")
+        producer, err := sarama.NewSyncProducer(brokerList, nil)
         if err != nil {
             log.Fatalf("Failed to create Kafka producer: %s", err)
         }
-        // Assuming cleanProducerClose function implemented
-        defer cleanProducerClose(producer)
-
-        return &KafkaOutput{producer: producer, topic: config.KafkaTopic} 
+        return &KafkaOutput{producer: producer, topic: config.KafkaTopic}
     } else if config.OutputFile != "" {
         file, err := os.Create(config.OutputFile)
         if err != nil {
@@ -80,20 +83,13 @@ func (sim *Simulator) determineOutputDestination(config *config.Config) OutputDe
     return &ConsoleOutput{}
 }
 
-// Placeholder: Ensures proper closure of the Kafka producer
-func cleanProducerClose(producer sarama.SyncProducer) {
-    if err := producer.Close(); err != nil {
-        log.Println("Error closing Kafka producer:", err)
-    }
-}
-
 // Helper to generate log-normal values
 func randomLogNormal(mean, stddev float64) float64 {
     return rand.NormFloat64()*stddev + mean
 }
 
 func (sim *Simulator) initializeUsers() {
-    stateMachine := models.InitializeStates() // Initialize a state machine for all users (or per user if different)
+    stateMachine := models.InitializeStates(sim.Config) // Initialize a state machine for all users (or per user if different)
     for i := 0; i < sim.Config.NUsers; i++ {
         // Generate random preferences based on weighted selections
         initialLevel := sim.weightedRandomInitialLevel()
@@ -215,7 +211,7 @@ func (sim *Simulator) RunSimulation() {
 
     sim.initializeUsers() // Setup initial user base for the simulation.
     log.Printf("Initial number of users: %d\n", sim.Config.NUsers)
-    log.Printf("Simulation starts from %s to %s\n", sim.Config.StartTime.Format(time.RFC3339), sim.Config.EndTime.Format(time.RFC3339))
+    log.Printf("Simulation starts from %s to %s\n", sim.Config.StartTime.UTC().Format(time.RFC3339), sim.Config.EndTime.Format(time.RFC3339))
 
     // Start the simulation timer
     ticker := time.NewTicker(1 * time.Second)
@@ -224,20 +220,27 @@ func (sim *Simulator) RunSimulation() {
     // Initialize variables for progress tracking
     var (
         eventsCount    int
-        lastReportTime = time.Now()
+        lastReportTime = time.Now().UTC()
     )
         
-    for currentTime := range ticker.C {
+    // Run the simulation until the current time exceeds the end time
+    simulationEndTime, _ := time.Parse(time.RFC3339, sim.Config.EndTime.Format(time.RFC3339))
+    for range ticker.C {
+        currentUTC := time.Now().UTC()
+        if currentUTC.After(simulationEndTime) {
+            log.Printf("Simulation end time reached: %s\n", simulationEndTime.Format(time.RFC3339))
+            break // Exit the loop to end the simulation
+        }
         for _, user := range sim.Users {
             // Ensure that the session exists and is not done
             if user.CurrentSession == nil || user.CurrentSession.IsDone() {
-                rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+                rng := rand.New(rand.NewSource(currentUTC.UnixNano()))
                 user.CurrentSession = models.NewSession(user.ID.String(), user.StateMachine, user.SubscriptionType, 0, user.StartTime, rng, sim.Config)
             }
 
             // Process the next event in the current session
 
-            eventMsg, err := user.NextEvent(rand.New(rand.NewSource(time.Now().UnixNano())), sim.Config)
+            eventMsg, err := user.NextEvent(rand.New(rand.NewSource(currentUTC.UnixNano())), sim.Config)
             if err != nil {
                 log.Printf("Error during event generation: %v", err)
                 continue
@@ -249,11 +252,12 @@ func (sim *Simulator) RunSimulation() {
         }
 
         // Calculate and display the rate of events
-        if time.Since(lastReportTime) >= eventRateCalcInterval {
-            rate := float64(eventsCount) / time.Since(lastReportTime).Seconds()
-            log.Printf("Time: %s, Events: %d, Rate: %.2f eps\n", currentTime.Format(time.RFC3339), eventsCount, rate)
+        if currentUTC.Sub(lastReportTime) >= eventRateCalcInterval {
+            rate := float64(eventsCount) / currentUTC.Sub(lastReportTime).Seconds()
+            log.Printf("Time: %s, Events: %d, Rate: %.2f eps\n", currentUTC.Format(time.RFC3339), eventsCount, rate)
             eventsCount = 0
-            lastReportTime = time.Now()
+            lastReportTime = currentUTC
         }
     }
+    log.Printf("Simulation completed at %s\n", time.Now().UTC().Format(time.RFC3339))
 }

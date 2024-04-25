@@ -58,16 +58,14 @@ func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (string, error) 
 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
 			u.startNewSession(rng, config)
 	} else {
+			u.CurrentSession.StateMachine.UpdateState(rng)
 			u.CurrentSession.IncrementEvent()
 	}
 
-	// Serialize the current state of the user or the event data to JSON
-	eventData, err := json.Marshal(u.CurrentSession) // Assuming you want to serialize the session data
-	if err != nil {
-			return "", fmt.Errorf("error serializing event data: %w", err)
-	}
+	// Use the Serialize method to get a consistent JSON string for logging
+	eventData := u.Serialize()
 
-	return string(eventData), nil
+	return eventData, nil
 }
 
 // startNewSession initializes a new session for the user.
@@ -87,19 +85,25 @@ func (u *User) startNewSession(rng *rand.Rand, config *config.Config) {
 
 // Serialize serializes the user's current state to a JSON string for logging.
 func (u *User) Serialize() string {
+	currentState := u.CurrentSession.StateMachine.CurrentState
 	data := map[string]interface{}{
-		"ts":              u.CurrentSession.CurrentState.EventTime.UnixMilli(),  // UNIX milliseconds 
+		"ts":              currentState.EventTime.UnixMilli(),  // UNIX milliseconds 
 		"userId":          u.ID.String(),
 		"sessionId":       u.CurrentSession.ID,
-		"page":            u.CurrentSession.CurrentState.Page,
-		"auth":            u.CurrentSession.CurrentState.AuthStatus,
-		"method":          u.CurrentSession.CurrentState.Method,
-		"status":          u.CurrentSession.CurrentState.StatusCode,
+		"page":            currentState.Page,
+		"auth":            currentState.AuthStatus,
+		"method":          currentState.Method,
+		"status":          currentState.StatusCode,
 		"itemInSession":   u.CurrentSession.NextEventNumber, // Adapt based on your counter 
 		"preferredGenres": u.PreferredGenres,
 		"favoriteShows":   u.FavoriteShows,
-		"viewingHours":    u.ViewingHours,
-		"subscriptionType": string(u.SubscriptionType),
+		"viewingHours":    		u.ViewingHours,
+		"subscriptionType": 	string(u.SubscriptionType),
+		"deviceType": 				u.Device["type"],
+		"eventType": 					u.CurrentSession.NextEventType,
+		"sessionDuration": 		time.Since(u.CurrentSession.StartTime).Minutes(),
+		"adsShown": 					u.CurrentSession.CurrentAd != nil,
+
 	}
 
 	jsonData, err := json.Marshal(data)

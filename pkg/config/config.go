@@ -30,7 +30,11 @@ type AdConfig struct {
 	MidRollWindow     time.Duration `mapstructure:"mid-roll-ad-window"` 
 }
 
-
+type Transition struct {
+	Source StateConfig `mapstructure:"source"`
+	Dest   StateConfig `mapstructure:"dest"`
+	P      float64     `mapstructure:"p"`  // Probability of this transition
+}
 // SessionPage defines the configuration for different pages that can be accessed in a session.
 type SessionPage struct {
 	Page    string `mapstructure:"page"`
@@ -50,6 +54,14 @@ type SessionPage struct {
     //   "mid-roll-ad-window": 30 * time.Second  // 30 seconds for mid-roll
     // }
 //   }
+
+type StateConfig struct {
+	Page   string `mapstructure:"page"`
+	Method string `mapstructure:"method"`
+	Status int    `mapstructure:"status"`
+	Auth   string `mapstructure:"auth"`
+	Level  string `mapstructure:"level"`
+}
 
 type Preference struct {
 	Name   string `mapstructure:"name"`
@@ -83,6 +95,7 @@ type Config struct {
 	AuthLevels           []Preference         `mapstructure:"auth-levels"`
 	SubscriptionChances  []SubscriptionChance `mapstructure:"subscription-chances"`
 	NewSessionPages      []SessionPage    		`mapstructure:"new-session"`
+	Transitions      		 []Transition 				`mapstructure:"transitions"`	
 
 	SimulateVideo     		bool          			`mapstructure:"simulate-video"` 
 	AttritionRate     		float64       			`mapstructure:"attrition-rate"`
