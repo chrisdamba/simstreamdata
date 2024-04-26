@@ -224,6 +224,9 @@ func (sim *Simulator) RunSession(user *models.User) {
     // Simulate watching the video
     fmt.Printf("User %s is watching %s\n", user.ID, selectedVideo.PrimaryTitle)
 
+    // Check video progress to handle end of video or continue playing
+    user.CurrentSession.CheckVideoProgress()
+
     // Simulate the end of the video
     fmt.Printf("User %s finished watching %s\n", user.ID, selectedVideo.PrimaryTitle)
 

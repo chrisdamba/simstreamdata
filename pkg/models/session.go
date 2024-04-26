@@ -140,54 +140,39 @@ func (s *Session) handleContent() {
 func (s *Session) handleAdEvent() {
 	// Define ad handling logic
 	switch s.NextEventType {
-    case "AdStart":
-        // Move to AdImpression
-        s.CurrentAd.StartTime = time.Now()
-        s.NextEventType = "AdImpression"
-        s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(10)+1) * time.Second) // Ad impressions occur shortly after ad starts
-    case "AdImpression":
-        // Move to AdComplete or next AdImpression
-        if s.Rng.Float64() < 0.8 { // 80% chance to go to next impression
+        case "AdStart":
+            // Move to AdImpression
+            s.CurrentAd.StartTime = time.Now()
             s.NextEventType = "AdImpression"
-            s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(10)+1) * time.Second)
-        } else {
-            s.NextEventType = "AdComplete"
-            s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(5)+1) * time.Second)
-        }
-    case "AdComplete":
-        // Finish the ad sequence and resume content
-        s.CurrentAd = nil
-        s.NextEventType = "Content"
-        s.scheduleNextEvent("resume content")
+            s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(10)+1) * time.Second) // Ad impressions occur shortly after ad starts
+        case "AdImpression":
+            // Transition logic for ad impressions
+            s.scheduleNextAdImpression()
+        case "AdComplete":
+            // Finish the ad sequence and resume content
+            s.finishAdAndResumeContent()
 	}
 	s.scheduleNextEvent(s.NextEventType)
 }
 
+func (s *Session) finishAdAndResumeContent() {
+    s.CurrentAd = nil // Clear the ad
+    s.NextEventType = "Content"
+    s.scheduleNextEvent("resume content")
+}
 
-func (s *Session) handleContentEvent(rng *rand.Rand, config *config.Config) {
-    if s.CurrentContent.Type == Audio {
-        s.handleNextAudioEvent(rng, config)
-    } else if s.CurrentContent.Type == VideoType {
-        if shouldInsertAd(s, config) {
-            s.startAdSequence("video")
-        } else {
-            s.scheduleNextEvent("video content")
-        }
+func (s *Session) scheduleNextAdImpression() {
+    // Move to AdComplete or next AdImpression
+    if s.Rng.Float64() < 0.8 { // 80% chance to go to next impression
+        s.NextEventType = "AdImpression"
+        s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(10)+1) * time.Second)
+    } else {
+        s.NextEventType = "AdComplete"
+        s.NextEventTime = time.Now().Add(time.Duration(s.Rng.Intn(5)+1) * time.Second)
     }
 }
 
-func (s *Session) handleNextAudioEvent(rng *rand.Rand, config *config.Config) {
-    // Audio event logic
-    if s.SubscriptionTier == Free {
-        // Check probability for an ad after a song
-        if rng.Float64() < config.AdConfig.AudioAdFrequency {
-            s.startAdSequence("audio")
-        }
-    }
-    s.scheduleNextEvent("song")
-}
-
-func (s *Session) handleNextVideoEvent(rng *rand.Rand, config *config.Config) {
+func (s *Session) HandleNextVideoEvent(config *config.Config) {
     currentTime := time.Since(s.CurrentContent.StartTime)
 
     // Check for pre-roll ad first
@@ -225,9 +210,10 @@ func (s *Session) startAdSequence(adType string) {
 	// Set the next event type to "AdStart" and schedule it immediately.
 	s.NextEventType = "AdStart"
 	s.NextEventTime = time.Now()
+    s.LastAdTime = time.Now()    // Update the last ad time
 
 	// Log the ad start for debugging.
-	fmt.Printf("Starting %s ad at %v, ID: %s\n", adType, s.NextEventTime, adID)
+	log.Printf("Starting %s ad at %v, ID: %s\n", adType, s.NextEventTime, adID)
 }
 
 
@@ -243,24 +229,6 @@ func (s *Session) scheduleNextEvent(eventType string) {
 func (s *Session) scheduleNextEventAt(eventType string, duration time.Duration) {
 	s.NextEventTime = time.Now().Add(duration)
 	s.NextEventType = eventType
-}
-
-
-// shouldInsertAd decides if an ad should be inserted at any point in the video content.
-func shouldInsertAd(s *Session, config *config.Config) bool {
-    // Directly return false if the session is not eligible for ads.
-    if s.SubscriptionTier != Free || s.CurrentContent.Type != VideoType {
-        return false // No ads for non-free users or for non-video content.
-    }
-
-    // Check for pre-roll ad opportunity.
-    // Assuming pre-roll ads can only start at the beginning of a video session or content play.
-    if s.CurrentContent.StartTime == s.StartTime && s.shouldInsertPreRollAd(config) {
-        return true
-    }
-
-    // Check for mid-roll ad opportunities based on defined breakpoints.
-    return s.shouldInsertMidRollAd(config)
 }
 
 // shouldInsertPreRollAd checks if a pre-roll ad should be inserted
@@ -304,7 +272,7 @@ func (s *Session) MarkAsFinished() {
 func (s *Session) StartVideo(video *config.Video) {
     s.CurrentVideo = video
     // Calculate the video end time based on the runtime minutes of the video
-    s.VideoEndTime = time.Now().Add(video.RuntimeMinutes * time.Minute)
+    s.VideoEndTime = time.Now().Add(video.RuntimeMinutes)
 
     // Logging video start for monitoring or debugging
     log.Printf("Video %s started in session %s, ends at %s", video.PrimaryTitle, s.ID, s.VideoEndTime.Format(time.RFC3339))
@@ -341,6 +309,36 @@ func (s *Session) decideNextSteps() {
         s.EndSession()
     }
 }
+
+func (s *Session) ShouldContinueSession() bool {
+	// Check if the session is already marked as finished.
+	if s.Finished {
+		return false
+	}
+
+	// Check if there is a current video and if it has finished playing.
+	if s.CurrentVideo != nil && !time.Now().After(s.VideoEndTime) {
+		return true // Continue if the video is still playing.
+	}
+
+	// Example of engagement-based logic: Continue if engagement is above a threshold.
+	// This could be expanded based on complex user engagement models.
+	if s.EngagementLevel > 50 {
+		return true
+	}
+
+	// Check if there's a time limit on the session duration.
+	maxSessionDuration := 2 * time.Hour // Example: 2 hours max duration
+	return time.Since(s.StartTime) < maxSessionDuration 
+
+	// Add more conditions as needed, for example:
+	// - Check user's activity patterns.
+	// - Check if there are still videos in the queue to be watched.
+	// - External interruptions or conditions to end the session.
+
+	//return false // Default to ending the session if none of the conditions match.
+}
+
 
 // EndSession handles the session closure.
 func (s *Session) EndSession() {

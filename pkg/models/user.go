@@ -58,10 +58,18 @@ func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subsc
 // NextEvent processes the next event for the user and returns the event data and any error encountered.
 func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (string, error) {
 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
-			u.startNewSession(rng, config)
+		u.startNewSession(rng, config)
 	} else {
-			u.CurrentSession.StateMachine.UpdateState(rng)
-			u.CurrentSession.IncrementEvent()
+		u.CurrentSession.StateMachine.UpdateState(rng)
+		u.CurrentSession.IncrementEvent()
+		if u.CurrentSession.NextEventType == "Content" && u.CurrentSession.CurrentAd == nil {
+			// Decide on post-roll ads or end session
+			if u.CurrentSession.ShouldContinueSession() {
+				u.CurrentSession.HandleNextVideoEvent(config)
+			} else {
+				u.CurrentSession.EndSession()
+			}
+		}
 	}
 
 	// Use the Serialize method to get a consistent JSON string for logging
