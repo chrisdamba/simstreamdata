@@ -15,12 +15,11 @@ import (
 )
 
 type OutputDestination interface {
-    WriteMessage(msg []byte) error
+    WriteMessage(topic string, msg []byte) error
 }
 
 type KafkaOutput struct {
     producer sarama.SyncProducer
-    topic    string
 }
 
 type Simulator struct {
@@ -30,7 +29,16 @@ type Simulator struct {
 }
 
 type FileOutput struct {
-    file *os.File
+    files map[string]*os.File
+    basePath string // Base directory for output files
+}
+
+// NewFileOutput creates a new FileOutput instance with initialized values.
+func NewFileOutput(basePath string) *FileOutput {
+    return &FileOutput{
+        files: make(map[string]*os.File),
+        basePath: basePath,
+    }
 }
 
 type ConsoleOutput struct{}
@@ -42,24 +50,41 @@ func NewSimulator(cfg *config.Config) *Simulator {
     }
 }
 
-func (f *FileOutput) WriteMessage(msg []byte) error {
-    _, err := f.file.Write(msg)
-    return err
+func (f *FileOutput) WriteMessage(topic string, msg []byte) error {
+    // Check if the file already exists in the map
+    if _, ok := f.files[topic]; !ok {
+        // If not, create the file
+        filename := fmt.Sprintf("%s/%s.txt", f.basePath, topic)
+        file, err := os.Create(filename)
+        if err != nil {
+            return fmt.Errorf("failed to create file for topic %s: %w", topic, err)
+        }
+        f.files[topic] = file
+    }
+
+    // Write the message to the corresponding file
+    _, err := f.files[topic].Write(msg)
+    if err != nil {
+        return fmt.Errorf("failed to write message to topic %s: %w", topic, err)
+    }
+
+    return nil
 }
 
-func (k *KafkaOutput) WriteMessage(msg []byte) error {
+
+func (k *KafkaOutput) WriteMessage(topic string, msg []byte) error {
     if k.producer == nil {
         return fmt.Errorf("Kafka producer is closed")
     }
     _, _, err := k.producer.SendMessage(&sarama.ProducerMessage{
-        Topic: k.topic,
+        Topic: topic,
         Value: sarama.ByteEncoder(msg),
     })
     return err
 }
 
 
-func (c *ConsoleOutput) WriteMessage(msg []byte) error {
+func (c *ConsoleOutput) WriteMessage(topic string, msg []byte) error {
     _, err := os.Stdout.Write(msg)
     return err
 }
@@ -72,13 +97,9 @@ func (sim *Simulator) determineOutputDestination(config *config.Config) OutputDe
         if err != nil {
             log.Fatalf("Failed to create Kafka producer: %s", err)
         }
-        return &KafkaOutput{producer: producer, topic: config.KafkaTopic}
+        return &KafkaOutput{producer: producer}
     } else if config.OutputFile != "" {
-        file, err := os.Create(config.OutputFile)
-        if err != nil {
-            log.Fatalf("Failed to create output file: %s", err)
-        }
-        return &FileOutput{file: file}
+        return NewFileOutput(config.OutputFile)
     }
     return &ConsoleOutput{}
 }
@@ -289,7 +310,7 @@ func (sim *Simulator) RunSimulation() {
                 log.Printf("Error during event generation: %v", err)
                 continue
             }
-            if err := output.WriteMessage([]byte(eventMsg)); err != nil {
+            if err := output.WriteMessage(eventMsg.Topic, eventMsg.Message); err != nil {
                 log.Printf("Failed to write message: %v", err)
             }
             eventsCount++

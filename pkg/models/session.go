@@ -109,12 +109,12 @@ func (s *Session) handleTransition(nextState *State) {
 	s.CurrentState = nextState
 
 	switch s.CurrentState.Page {
-	case "PlayVideo", "NextSong":
-		s.handleContent()
-	case "AdStart", "AdImpression", "AdEnd":
-		s.handleAdEvent()
-	default:
-		s.scheduleNextEvent("generic")
+        case "PlayVideo", "NextSong":
+            s.handleContent()
+        case "AdStart", "AdImpression", "AdEnd":
+            s.handleAdEvent()
+        default:
+            s.scheduleNextEvent("generic")
 	}
 }
 

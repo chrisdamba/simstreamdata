@@ -122,8 +122,7 @@ type Config struct {
 	EndTime           		time.Time     			`mapstructure:"end-time"`
 	KafkaEnabled     			bool          			`mapstructure:"kafka-enabled"` 
 	KafkaBrokerList   		string        			`mapstructure:"kafka-broker-list"`
-	KafkaTopic        		string        			`mapstructure:"kafka-topic"`
-	OutputFile        		string        			`mapstructure:"output-file"`
+	OutputFile        		string        			`mapstructure:"output-file-path"`
 	Continuous        		bool          			`mapstructure:"continuous"` 
 }
 
@@ -188,15 +187,15 @@ func LoadVideosFromIMDb(filename string) ([]Video, error) {
         genres := strings.Split(parts[8], ",")
 
         video := Video{
-            ID:             parts[0],
-            TitleType:      parts[1],
-            PrimaryTitle:   parts[2],
-            OriginalTitle:  parts[3],
-            IsAdult:        parts[4] == "1",
-            StartYear:      parts[5],
-            EndYear:        parts[6],
-            RuntimeMinutes: time.Duration(runtimeMinutes) * time.Minute,
-            Genres:         genres,
+					ID:             parts[0],
+					TitleType:      parts[1],
+					PrimaryTitle:   parts[2],
+					OriginalTitle:  parts[3],
+					IsAdult:        parts[4] == "1",
+					StartYear:      parts[5],
+					EndYear:        parts[6],
+					RuntimeMinutes: time.Duration(runtimeMinutes) * time.Minute,
+					Genres:         genres,
         }
         videos = append(videos, video)
     }

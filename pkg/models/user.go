@@ -29,8 +29,71 @@ type User struct {
 	CurrentSession   *Session
 }
 
+type EventMessage struct {
+	Topic   string
+	Message []byte
+}
+
+type PageViewEvent struct {
+	Timestamp      int64  `json:"ts"`
+	SessionID      string `json:"sessionId"`
+	SessionDuration float64 `json:"sessionDuration"`
+	Page           string `json:"page"`
+	Auth           string `json:"auth"`
+	Method         string `json:"method"`
+	Status         int    `json:"status"`
+	UserID         string `json:"userId"`
+	DeviceType     string `json:"deviceType"`
+	DeviceOS   		 string `json:"deviceOs"`
+	ItemInSession  int    `json:"itemInSession"`
+	SubscriptionType string `json:"subscriptionType"`
+}
+
+type AuthEvent struct {
+	PageViewEvent
+	Success    bool `json:"success"`
+}
+
+type ListenEvent struct {
+	PageViewEvent
+	SongID     	string `json:"songId"`
+	AudioTitle  string `json:"audioTitle"`
+	ArtistName	string `json:"artistName"`
+	Duration    int 	 `json:"duration"` // in seconds
+}
+
+type WatchEvent struct {
+	PageViewEvent
+	VideoID     string `json:"videoId"`
+	VideoTitle  string `json:"videoTitle"`
+	Genres 			string `json:"genres"`
+	Duration    int    `json:"duration"`// in seconds
+}
+
+type AdEvent struct {
+	PageViewEvent
+	AdID        string `json:"adId"`
+	AdType      string `json:"adType"`
+	Duration    int 	 `json:"duration"`// in seconds
+}
+
+type StatusChangeEvent struct {
+	PageViewEvent
+	OldStatus   string
+	NewStatus   string
+}
+
+// DeviceTypes defines possible types of devices for the simulation.
+var DeviceTypes = []string{"smartphone", "tablet", "desktop", "laptop"}
+
+// OperatingSystems defines possible operating systems for the devices.
+var OperatingSystems = []string{"Android", "iOS", "Windows", "macOS", "Linux"}
+
 // NewUser creates a new User instance.
 func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subscriptionType SubscriptionType, stateMachine *StateMachine, genres map[string]int) *User {
+	// Randomly select device type and operating system for the user
+	deviceType := DeviceTypes[rand.Intn(len(DeviceTypes))]
+	operatingSystem := OperatingSystems[rand.Intn(len(OperatingSystems))]
 	return &User{
 		ID:               uuid.New(),
 		Alpha:            alpha,
@@ -41,7 +104,11 @@ func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subsc
 		SubscriptionType: subscriptionType,
 		StateMachine: stateMachine,
 		Properties:       make(map[string]interface{}),
-		Device:           make(map[string]interface{}),
+		Device: map[string]interface{}{
+			"type":    deviceType,
+			"os":      operatingSystem,
+			"version": "1.0", // Example fixed value for all devices
+		},
 		GenrePreferences: genres, 
 	}
 }
@@ -55,8 +122,13 @@ func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subsc
 // 	}
 // }
 
+// Serialize data into JSON for simplicity
+func serialize(data interface{}) ([]byte, error) {
+	return json.Marshal(data)
+}
+
 // NextEvent processes the next event for the user and returns the event data and any error encountered.
-func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (string, error) {
+func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (EventMessage, error) {
 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
 		u.startNewSession(rng, config)
 	} else {
@@ -73,9 +145,7 @@ func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (string, error) 
 	}
 
 	// Use the Serialize method to get a consistent JSON string for logging
-	eventData := u.Serialize()
-
-	return eventData, nil
+	return u.Serialize(rng)
 }
 
 // startNewSession initializes a new session for the user.
@@ -94,8 +164,24 @@ func (u *User) startNewSession(rng *rand.Rand, config *config.Config) {
 }
 
 // Serialize serializes the user's current state to a JSON string for logging.
-func (u *User) Serialize() string {
-	currentState := u.CurrentSession.StateMachine.CurrentState
+func (u *User) Serialize(rng *rand.Rand) (EventMessage, error) {
+	currentState := u.CurrentSession.StateMachine.CurrentState  
+
+	baseEvent := PageViewEvent{
+		Timestamp:      time.Now().Unix(),
+		SessionID:      u.CurrentSession.ID,
+		SessionDuration: time.Since(u.CurrentSession.StartTime).Minutes(),
+		Page:           currentState.Page,
+		Auth:           currentState.AuthStatus,
+		Method:         currentState.Method,
+		Status:         currentState.StatusCode,
+		UserID:         u.ID.String(),
+		DeviceType:     u.Device["type"].(string),
+		DeviceOS:       u.Device["os"].(string),
+		ItemInSession:  u.CurrentSession.NextEventNumber,
+		SubscriptionType: string(u.SubscriptionType),
+	}
+	/*
 	data := map[string]interface{}{
 		"ts":              currentState.EventTime.UnixMilli(),  // UNIX milliseconds 
 		"userId":          u.ID.String(),
@@ -118,13 +204,61 @@ func (u *User) Serialize() string {
 		"duration":     			u.CurrentSession.CurrentVideo.RuntimeMinutes.String(),
 
 	}
+	*/
 
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		fmt.Println("Error serializing user data:", err)
-		return "{}"
+	var topic = "page_views_events"
+	var event interface{}
+	switch currentState.Page {
+		case "Login", "Logout", "Register":
+			event = AuthEvent{
+				PageViewEvent: baseEvent,
+				Success:       currentState.AuthStatus == "Logged In",
+			}
+			topic = "auth_events"
+
+		case "PlayVideo":
+			event = WatchEvent{
+				PageViewEvent: baseEvent,
+				VideoID:    u.CurrentSession.CurrentVideo.ID,
+				VideoTitle: u.CurrentSession.CurrentVideo.PrimaryTitle,
+				Duration:   int(u.CurrentSession.CurrentVideo.RuntimeMinutes),
+			}
+			topic = "watch_events"
+
+		case "NextSong":
+			event = ListenEvent{
+				PageViewEvent: baseEvent,
+				SongID:        "someSongID",
+				AudioTitle:    "Some Song Title",
+				ArtistName:    "Some Artist",
+				Duration:      180, // example duration in seconds
+			}
+			topic = "listen_events"
+		case "AdStart", "AdImpression", "AdEnd":
+			event = AdEvent{
+				PageViewEvent: baseEvent,
+				AdID:       u.CurrentSession.CurrentAd.ID,
+				AdType:     u.CurrentSession.CurrentAd.Type,
+				Duration:   int(u.CurrentSession.CurrentAd.Duration),
+			}
+			topic = "ad_events"
+
+		case "SubmitUpgrade", "SubmitDowngrade", "CancelSubscription":
+			event = StatusChangeEvent{
+				PageViewEvent: baseEvent,
+				OldStatus:  string(u.SubscriptionType),
+				NewStatus:  string(u.SubscriptionType),
+			}
+		default:
+			event = baseEvent
 	}
-	return string(jsonData)
+	// Serialize the event
+	data, err := serialize(event)
+	if err != nil {
+		return EventMessage{}, fmt.Errorf("error serializing event: %w", err)
+	}
+
+	return EventMessage{Topic: topic, Message: data}, nil
 }
 
 // AdjustGenrePreferences updates the user's preferences based on the genres of the recently watched video.
