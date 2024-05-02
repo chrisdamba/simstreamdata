@@ -3,8 +3,14 @@ package config
 import (
 	"bufio"
 	"compress/gzip"
+	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"math/rand"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +84,14 @@ type SubscriptionChance struct {
 	Chance float64 `mapstructure:"chance"`
 }
 
+type Movie struct {
+	MovieID   string
+	Name      string
+	RuntimeMinutes time.Duration
+	Genres    []string
+	Star      string
+}
+
 type Video struct {
 	ID             string
 	TitleType      string
@@ -98,7 +112,7 @@ type Config struct {
 	WeekendDamping       float64              `mapstructure:"weekend-damping"`
 	WeekendDampingOffset int                  `mapstructure:"weekend-damping-offset"`
 	WeekendDampingScale  int                  `mapstructure:"weekend-damping-scale"`
-	SessionGap           int                  `mapstructure:"session-gap"`
+	SessionGap           float64              `mapstructure:"session-gap"`
 	StartDate            string               `mapstructure:"start-date"`
 	EndDate              string               `mapstructure:"end-date"`
 	NUsers               int                  `mapstructure:"n-users"`
@@ -114,7 +128,8 @@ type Config struct {
 	SubscriptionChances  []SubscriptionChance `mapstructure:"subscription-chances"`
 	NewSessionPages      []SessionPage    		`mapstructure:"new-session"`
 	Transitions      		 []Transition 				`mapstructure:"transitions"`	
-	AllVideos 					 []Video 							`mapstructure:"all-videos"` // List of all videos loaded from IMDb
+	Movies   						 []*Movie							`mapstructure:"movies"` // List of movies to be used as "video" content
+	GenreMap 						 map[string][]*Movie	`mapstructure:"genre-map"` // Map of genres to movies
 
 	SimulateVideo     		bool          			`mapstructure:"simulate-video"` 
 	AttritionRate     		float64       			`mapstructure:"attrition-rate"`
@@ -124,7 +139,20 @@ type Config struct {
 	KafkaBrokerList   		string        			`mapstructure:"kafka-broker-list"`
 	OutputFile        		string        			`mapstructure:"output-file-path"`
 	Continuous        		bool          			`mapstructure:"continuous"` 
+	rng      							*rand.Rand
 }
+
+// NextMovie returns a random movie based on genre weighting.
+func (cfg *Config) NextMovie() *Movie {
+	genreKeys := make([]string, 0, len(cfg.GenreMap))
+	for k := range cfg.GenreMap {
+			genreKeys = append(genreKeys, k)
+	}
+	randomGenre := genreKeys[cfg.rng.Intn(len(genreKeys))]
+	movies := cfg.GenreMap[randomGenre]
+	return movies[cfg.rng.Intn(len(movies))]
+}
+
 
 // LoadConfig initializes and reads the configuration using Viper
 func LoadConfig(cfgFile string) (*Config, error) {
@@ -201,18 +229,90 @@ func LoadVideosFromIMDb(filename string) ([]Video, error) {
     }
 
     if err := scanner.Err(); err != nil {
-        return nil, err
+      return nil, err
     }
     return videos, nil
 }
 
-
-// Add a method to the Config struct to load videos into it
-func (c *Config) InitializeVideos(filePath string) error {
-	videos, err := LoadVideosFromIMDb(filePath)
+// LoadMovies loads movies from a CSV file.
+func (cfg *Config) LoadMovies(filePath string) error {
+	file, err := os.Open(filePath)
 	if err != nil {
 			return err
 	}
-	c.AllVideos = videos
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	reader.Read()       
+
+	for {
+			record, err := reader.Read()
+			if err == io.EOF {
+					break
+			}
+			if err != nil {
+					return err
+			}
+
+			runtime, err := parseRuntime(record[4])
+			if err != nil {
+				log.Printf("Skipping movie due to invalid runtime: %v", err)
+				continue
+			}
+
+			movie := &Movie{
+					MovieID:        record[0],
+					Name:           record[1],
+					RuntimeMinutes: runtime,
+					Genres:         strings.Split(record[5], ", "),
+					Star:           record[10],
+			}
+			cfg.Movies = append(cfg.Movies, movie)
+			for _, genre := range movie.Genres {
+				cfg.GenreMap[genre] = append(cfg.GenreMap[genre], movie)
+			}
+	}
+
+	return nil
+}
+
+// parseRuntime converts a runtime string "180 min" to time.Duration
+func parseRuntime(s string) (time.Duration, error) {
+	if len(s) == 0 {
+		randomMinutes := rand.Intn(121) + 60 
+		return time.Duration(randomMinutes) * time.Minute, nil
+	}
+	parts := strings.Fields(s)
+	if len(parts) != 2 || parts[1] != "min" {
+			return 0, errors.New("invalid runtime format")
+	}
+	numberPart := strings.Replace(parts[0], ",", "", -1)
+	minutes, err := strconv.Atoi(numberPart)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(minutes) * time.Minute, nil
+}
+
+
+func (c *Config) InitializeMovies(filePath string) error {
+	c.GenreMap = make(map[string][]*Movie)
+	c.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	err := filepath.Walk(filePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".csv") {
+			if err := c.LoadMovies(path); err != nil {
+				log.Printf("Failed to load movies: %v", err)
+				return err
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
 	return nil
 }

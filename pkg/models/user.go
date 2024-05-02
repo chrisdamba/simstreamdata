@@ -7,12 +7,12 @@ import (
 	"time"
 
 	"github.com/chrisdamba/simstreamdata/pkg/config"
-	"github.com/google/uuid"
+	"github.com/bxcodec/faker/v3"
 )
 
 // User holds the data for a simulated user.
 type User struct {
-	ID               uuid.UUID
+	ID               int64
 	Alpha            float64
 	Beta             float64
 	StartTime        time.Time
@@ -27,6 +27,59 @@ type User struct {
 	ViewingHours     int
 	SubscriptionType SubscriptionType
 	CurrentSession   *Session
+	Rng             *rand.Rand
+	Config          *config.Config
+}
+
+// Queue interface defines the queue operations.
+type Queue interface {
+	Enqueue(item interface{})
+	Dequeue() (item interface{}, ok bool)
+}
+
+// SliceQueue implements a queue using a slice to hold elements.
+type SliceQueue struct {
+	items []interface{}
+}
+
+func NewSliceQueue() *SliceQueue {
+	return &SliceQueue{items: make([]interface{}, 0)}
+}
+
+func (q *SliceQueue) Enqueue(item interface{}) {
+	q.items = append(q.items, item)
+}
+
+func (q *SliceQueue) Dequeue() (interface{}, bool) {
+	if len(q.items) == 0 {
+			return nil, false
+	}
+	item := q.items[0]
+	q.items = q.items[1:]
+	return item, true
+}
+
+// UserQueue is a queue specifically for Users.
+type UserQueue struct {
+	queue Queue
+}
+
+func NewUserQueue() *UserQueue {
+	return &UserQueue{
+		queue: NewSliceQueue(),
+	}
+}
+
+func (uq *UserQueue) Enqueue(user *User) {
+	uq.queue.Enqueue(user)
+}
+
+func (uq *UserQueue) Dequeue() (*User, bool) {
+	item, ok := uq.queue.Dequeue()
+	if !ok {
+			return nil, false
+	}
+	return item.(*User), true
 }
 
 type EventMessage struct {
@@ -36,17 +89,21 @@ type EventMessage struct {
 
 type PageViewEvent struct {
 	Timestamp      int64  `json:"ts"`
-	SessionID      string `json:"sessionId"`
+	SessionID      int64 `json:"sessionId"`
 	SessionDuration float64 `json:"sessionDuration"`
 	Page           string `json:"page"`
 	Auth           string `json:"auth"`
 	Method         string `json:"method"`
 	Status         int    `json:"status"`
-	UserID         string `json:"userId"`
+	UserID         int64 `json:"userId"`
 	DeviceType     string `json:"deviceType"`
 	DeviceOS   		 string `json:"deviceOs"`
 	ItemInSession  int    `json:"itemInSession"`
-	SubscriptionType string `json:"subscriptionType"`
+	SubscriptionType 	string `json:"subscriptionType"`
+	FirstName 				string `json:"firstName"`
+	LastName 					string `json:"lastName"`
+	Gender 						string `json:"gender"`
+	DateOfBirth				string `json:"dob"`
 }
 
 type AuthEvent struct {
@@ -89,83 +146,90 @@ var DeviceTypes = []string{"smartphone", "tablet", "desktop", "laptop"}
 // OperatingSystems defines possible operating systems for the devices.
 var OperatingSystems = []string{"Android", "iOS", "Windows", "macOS", "Linux"}
 
+
+// SessionIDCounter holds the current count for user IDs.
+var userIDCounter int64
+
+// NextSessionID increments the user ID counter and returns the next ID.
+func NextUserID() int64 {
+    lock.Lock()
+    defer lock.Unlock()
+    userIDCounter++
+    return userIDCounter
+}
+
 // NewUser creates a new User instance.
-func NewUser(alpha, beta float64, startTime time.Time, auth, level string, subscriptionType SubscriptionType, stateMachine *StateMachine, genres map[string]int) *User {
+func NewUser(alpha float64, beta float64, startTime time.Time, auth, level string, cfg *config.Config, rng *rand.Rand, genres map[string]int) *User {
 	// Randomly select device type and operating system for the user
 	deviceType := DeviceTypes[rand.Intn(len(DeviceTypes))]
 	operatingSystem := OperatingSystems[rand.Intn(len(OperatingSystems))]
+	// Generate fake user details
+	firstName := faker.FirstName()
+	lastName := faker.LastName()
+	gender := faker.Gender()
+	dob := faker.Date()
+	tempSession := &Session{
+		Config: cfg,  
+		Rng: rng,  
+	}
+	nextEventTime := tempSession.PickFirstTimeStamp(startTime, beta)
+	stateMap := InitializeStatesWithAuthLevel(cfg, rng)
+	session := NewSession(nextEventTime, alpha, beta, stateMap, auth, level, rng, cfg)
+
 	return &User{
-		ID:               uuid.New(),
+		ID:               NextUserID(),
 		Alpha:            alpha,
 		Beta:             beta,
 		StartTime:        startTime,
 		Auth:             auth,
 		InitialLevel:     level,
-		SubscriptionType: subscriptionType,
-		StateMachine: stateMachine,
-		Properties:       make(map[string]interface{}),
+		CurrentSession:  	session,
+		Properties: map[string]interface{}{
+			"firstName": firstName,
+			"lastName": lastName,
+			"gender": gender,
+			"dob": dob,
+		},
 		Device: map[string]interface{}{
 			"type":    deviceType,
 			"os":      operatingSystem,
-			"version": "1.0", // Example fixed value for all devices
+			"version": "1.0",
 		},
-		GenrePreferences: genres, 
+		GenrePreferences: genres,
+		Rng: 					 		rng,
+		Config:          	cfg,
 	}
 }
 
-// NextEvent processes the next event based on the user's current state.
-// func (u *User) NextEvent(rng *rand.Rand, config *config.Config) {
-// 	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
-// 		u.startNewSession(rng, config)
-// 	} else {
-// 		u.CurrentSession.IncrementEvent(rng, config)
-// 	}
-// }
+// nextEvent with optional probability of attrition
+func (u *User) NextEvent(prAttrition ...float64) {
+	u.CurrentSession.IncrementEvent()
+	if u.CurrentSession.IsDone() {
+		var probability float64
+		if len(prAttrition) > 0 {
+			probability = prAttrition[0]
+		}
+
+		if u.Rng.Float64() < probability || u.CurrentSession.CurrentState.AuthStatus == "" {
+			u.CurrentSession.NextEventTime = time.Time{} // Assign zero value of time.Time
+			fmt.Println("Session marked as potentially churned")
+		} else {
+			u.CurrentSession = u.CurrentSession.NextSession()
+			fmt.Println("Moved to next session")
+		}
+	}
+}
+
 
 // Serialize data into JSON for simplicity
 func serialize(data interface{}) ([]byte, error) {
 	return json.Marshal(data)
 }
 
-// NextEvent processes the next event for the user and returns the event data and any error encountered.
-func (u *User) NextEvent(rng *rand.Rand, config *config.Config) (EventMessage, error) {
-	if u.CurrentSession == nil || u.CurrentSession.IsDone() {
-		u.startNewSession(rng, config)
-	} else {
-		u.CurrentSession.StateMachine.UpdateState(rng)
-		u.CurrentSession.IncrementEvent()
-		if u.CurrentSession.NextEventType == "Content" && u.CurrentSession.CurrentAd == nil {
-			// Decide on post-roll ads or end session
-			if u.CurrentSession.ShouldContinueSession() {
-				u.CurrentSession.HandleNextVideoEvent(config)
-			} else {
-				u.CurrentSession.EndSession()
-			}
-		}
-	}
-
-	// Use the Serialize method to get a consistent JSON string for logging
-	return u.Serialize(rng)
-}
-
-// startNewSession initializes a new session for the user.
-func (u *User) startNewSession(rng *rand.Rand, config *config.Config) {
-	// Ensure there are session pages to choose from
-	if len(config.NewSessionPages) == 0 {
-			panic("no session pages available in configuration")
-	}
-
-
-	// Assume a default engagement level, or compute it based on some logic
-	engagementLevel := 0  // Placeholder for actual logic
-
-	// Create a new session with the selected state
-	u.CurrentSession = NewSession(u.ID.String(), u.StateMachine, u.SubscriptionType, engagementLevel, u.StartTime, rng, config)
-}
 
 // Serialize serializes the user's current state to a JSON string for logging.
-func (u *User) Serialize(rng *rand.Rand) (EventMessage, error) {
-	currentState := u.CurrentSession.StateMachine.CurrentState  
+func (u *User) Serialize(rng *rand.Rand, config *config.Config) (EventMessage, error) {
+	currentState := u.CurrentSession.CurrentState  
 
 	baseEvent := PageViewEvent{
 		Timestamp:      time.Now().Unix(),
@@ -175,36 +239,15 @@ func (u *User) Serialize(rng *rand.Rand) (EventMessage, error) {
 		Auth:           currentState.AuthStatus,
 		Method:         currentState.Method,
 		Status:         currentState.StatusCode,
-		UserID:         u.ID.String(),
+		UserID:         u.ID,
 		DeviceType:     u.Device["type"].(string),
 		DeviceOS:       u.Device["os"].(string),
-		ItemInSession:  u.CurrentSession.NextEventNumber,
+		ItemInSession:  u.CurrentSession.ItemInSession,
 		SubscriptionType: string(u.SubscriptionType),
+		FirstName: 			u.Properties["firstName"].(string),
+		LastName: 			u.Properties["lastName"].(string),
+		DateOfBirth: 		u.Properties["dob"].(string),	
 	}
-	/*
-	data := map[string]interface{}{
-		"ts":              currentState.EventTime.UnixMilli(),  // UNIX milliseconds 
-		"userId":          u.ID.String(),
-		"sessionId":       u.CurrentSession.ID,
-		"page":            currentState.Page,
-		"auth":            currentState.AuthStatus,
-		"method":          currentState.Method,
-		"status":          currentState.StatusCode,
-		"itemInSession":   u.CurrentSession.NextEventNumber, // Adapt based on your counter 
-		"preferredGenres": u.PreferredGenres,
-		"favoriteShows":   u.FavoriteShows,
-		"viewingHours":    		u.ViewingHours,
-		"subscriptionType": 	string(u.SubscriptionType),
-		"deviceType": 				u.Device["type"],
-		"eventType": 					u.CurrentSession.NextEventType,
-		"sessionDuration": 		time.Since(u.CurrentSession.StartTime).Minutes(),
-		"adsShown": 					u.CurrentSession.CurrentAd != nil,
-		"videoID":     				u.CurrentSession.CurrentVideo.ID,
-		"title":        			u.CurrentSession.CurrentVideo.PrimaryTitle,
-		"duration":     			u.CurrentSession.CurrentVideo.RuntimeMinutes.String(),
-
-	}
-	*/
 
 	var topic = "page_views_events"
 	var event interface{}
@@ -216,12 +259,12 @@ func (u *User) Serialize(rng *rand.Rand) (EventMessage, error) {
 			}
 			topic = "auth_events"
 
-		case "PlayVideo":
+		case "NextVideo":
 			event = WatchEvent{
 				PageViewEvent: baseEvent,
-				VideoID:    u.CurrentSession.CurrentVideo.ID,
-				VideoTitle: u.CurrentSession.CurrentVideo.PrimaryTitle,
-				Duration:   int(u.CurrentSession.CurrentVideo.RuntimeMinutes),
+				VideoID:    u.CurrentSession.CurrentMovie.MovieID,
+				VideoTitle: u.CurrentSession.CurrentMovie.Name,
+				Duration:   int(u.CurrentSession.CurrentMovie.RuntimeMinutes.Minutes()),
 			}
 			topic = "watch_events"
 
@@ -235,6 +278,9 @@ func (u *User) Serialize(rng *rand.Rand) (EventMessage, error) {
 			}
 			topic = "listen_events"
 		case "AdStart", "AdImpression", "AdEnd":
+			if u.CurrentSession.CurrentAd == nil {
+				u.CurrentSession.handleAdEvent()
+			} 
 			event = AdEvent{
 				PageViewEvent: baseEvent,
 				AdID:       u.CurrentSession.CurrentAd.ID,
@@ -243,7 +289,7 @@ func (u *User) Serialize(rng *rand.Rand) (EventMessage, error) {
 			}
 			topic = "ad_events"
 
-		case "SubmitUpgrade", "SubmitDowngrade", "CancelSubscription":
+		case "Submit Upgrade", "Submit Downgrade", "Cancel Subscription":
 			event = StatusChangeEvent{
 				PageViewEvent: baseEvent,
 				OldStatus:  string(u.SubscriptionType),
@@ -283,40 +329,6 @@ func (u *User) DecidesToContinueWatching() bool {
 	return rand.Float32() < 0.8 // 80% chance to continue watching
 }
 
-func (u *User) SelectVideo(config *config.Config) *config.Video {
-	/*
-	weightedVideos := make([]*config.Video, 0)
-	weights := make([]int, 0)
-
-	// Create a weighted list of videos based on user's genre preferences
-	for _, v := range config.AllVideos {
-			genreWeight := 0
-			for _, genre := range v.Genres {
-					if weight, ok := u.GenrePreferences[genre]; ok {
-							genreWeight += weight
-					}
-			}
-			if genreWeight > 0 { // Only consider videos that match the user's genre preferences
-					weightedVideos = append(weightedVideos, &v) // Note the address of v here
-					weights = append(weights, genreWeight)
-			}
-	}
-
-	// Perform weighted random selection
-	if len(weightedVideos) == 0 {
-			return nil // No videos match the user's preferences
-	}
-	return weightedRandomSelect(weightedVideos, weights) // Make sure this function returns *config.Video
-	*/
-
-	// Directly reference a Video from config to see if the type is accessible
-	if len(config.AllVideos) > 0 {
-		// Randomly select a new video from the list
-		newVideo := config.AllVideos[rand.Intn(len(config.AllVideos))]
-		return &newVideo // Access the first video directly
-	}
-	return nil
-}
 
 // Implement weightedRandomSelect assuming it returns *config.Video
 func weightedRandomSelect(videos []*config.Video, weights []int) *config.Video {

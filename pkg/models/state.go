@@ -23,21 +23,49 @@ type Transition struct {
 }
 
 type StateMachine struct {
-	States       []*State
-	CurrentState *State
+	States       		[]*State
+	CurrentState 		*State
+	StateGenerator 	*WeightedRandomThingGenerator[*State]
 }
 
-func NewStateMachine() *StateMachine {
-	return &StateMachine{}
+type AuthLevelStateMap struct {
+	Generators map[string]*WeightedRandomThingGenerator[*State]
 }
 
-func (sm *StateMachine) AddState(state *State) {
+
+func NewStateMachine(rng *rand.Rand) *StateMachine {
+	return &StateMachine{
+			StateGenerator: NewWeightedRandomThingGenerator[*State](),
+	}
+}
+
+func (sm *StateMachine) AddState(state *State, weight int) {
 	sm.States = append(sm.States, state)
+	sm.StateGenerator.Add(state, weight)
 }
 
 // SetInitialState sets the initial state of the state machine.
 func (sm *StateMachine) SetInitialState(state *State) {
 	sm.CurrentState = state
+}
+
+func (sm *StateMachine) SetRandomInitialState(rng *rand.Rand, cfg *config.Config, stateMap map[string]*State) {
+	if sm.StateGenerator != nil {
+		initialState := sm.StateGenerator.RandomThing(rng)
+		// Check if initial state has transitions
+		if len(initialState.Transitions) == 0 {
+			// Find all transitions where the initial state is the source
+			for _, trans := range cfg.Transitions {
+				if trans.Source.Page == initialState.Page {
+						destState := stateMap[trans.Dest.Page]
+						if destState != nil {
+							initialState.AddTransition(destState, trans.P)
+						}
+				}
+			}
+		}
+		sm.CurrentState = initialState
+	}
 }
 
 // UpdateState moves the state machine to the next state based on the probability transitions.
@@ -69,11 +97,32 @@ func (s *State) GetNextState(rng *rand.Rand) *State {
 	return nil // Return nil if no transition is found (or default state)
 }
 
-func InitializeStates(cfg *config.Config) *StateMachine {
-	sm := NewStateMachine()
-	stateMap := make(map[string]*State) // Temporary map to store states for easy lookup
+func NewAuthLevelStateMap() *AuthLevelStateMap {
+	return &AuthLevelStateMap{
+		Generators: make(map[string]*WeightedRandomThingGenerator[*State]),
+	}
+}
 
-	// Step 1: Create states
+func (alm *AuthLevelStateMap) Add(auth, level string, state *State, weight int) {
+	key := auth + "|" + level // Simplify key management
+	if _, exists := alm.Generators[key]; !exists {
+		alm.Generators[key] = NewWeightedRandomThingGenerator[*State]()
+	}
+	alm.Generators[key].Add(state, weight)
+}
+
+func (alm *AuthLevelStateMap) GetRandomState(auth, level string, rng *rand.Rand) *State {
+	key := auth + "|" + level
+	if gen, exists := alm.Generators[key]; exists {
+		return gen.RandomThing(rng)
+	}
+	return nil // or default state if required
+}
+
+func InitializeStatesWithAuthLevel(cfg *config.Config, rng *rand.Rand) *AuthLevelStateMap {
+	stateMap := NewAuthLevelStateMap()
+	tempStateMap := make(map[string]*State) 
+	sm := NewStateMachine(rng)
 	for _, page := range cfg.NewSessionPages {
 		state := &State{
 			Page:       page.Page,
@@ -83,62 +132,18 @@ func InitializeStates(cfg *config.Config) *StateMachine {
 			AuthStatus: page.Auth,
 			EventTime:  time.Now(),
 		}
-		sm.AddState(state)
-		stateMap[page.Page] = state // Add to map for easy reference
+		sm.AddState(state, page.Weight)
+		stateMap.Add(page.Auth, page.Level, state, page.Weight)
+		tempStateMap[page.Page] = state
 	}
 
-	// Step 2: Setup transitions based on the transitions configuration
 	for _, trans := range cfg.Transitions {
-		sourceState := stateMap[trans.Source.Page]
-		destState := stateMap[trans.Dest.Page]
+		sourceState := tempStateMap[trans.Source.Page]
+		destState := tempStateMap[trans.Dest.Page]
 		if sourceState != nil && destState != nil {
 			sourceState.AddTransition(destState, trans.P)
 		}
 	}
 
-	// Optionally set an initial state, here setting the first state as initial if available
-	if len(sm.States) > 0 {
-		sm.SetInitialState(sm.States[0])
-	}
-
-	return sm
+	return stateMap
 }
-
-
-// func InitializeStates(cfg *config.Config) *StateMachine {
-// 	sm := NewStateMachine()
-// 	home := &State{Page: "Home", StatusCode: 200, Method: "GET", UserLevel: "free", AuthStatus: "Logged In", EventTime: time.Now()}
-// 	playVideo := &State{Page: "PlayVideo", StatusCode: 200, Method: "PUT", UserLevel: "free", AuthStatus: "Logged In", EventTime: time.Now()}
-
-// 	sm.AddState(home)
-// 	sm.AddState(playVideo)
-
-// 	home.AddTransition(playVideo, 0.8) // 80% probability to transition from Home to PlayVideo
-// 	playVideo.AddTransition(home, 0.5) // 50% probability to return to Home
-
-// 	return sm
-// }
-/*
-func initializeStates() *StateMachine {
-	sm := NewStateMachine()
-	// Define example states
-	browsing := &State{Page: "Browse", StatusCode: 200, Method: "GET", UserLevel: "free", AuthStatus: "Logged In"}
-	playback := &State{Page: "PlayVideo", StatusCode: 200, Method: "GET", UserLevel: "free", AuthStatus: "Logged In"}
-	pause := &State{Page: "PauseVideo", StatusCode: 200, Method: "PUT", UserLevel: "free", AuthStatus: "Logged In"}
-	accountActivity := &State{Page: "AccountUpdate", StatusCode: 200, Method: "POST", UserLevel: "free", AuthStatus: "Logged In"}
-
-	sm.AddState(browsing)
-	sm.AddState(playback)
-	sm.AddState(pause)
-	sm.AddState(accountActivity)
-
-	// Define transitions
-	sm.AddTransition(browsing, playback, 0.5)   // 50% chance to move from browsing to playback
-	sm.AddTransition(playback, pause, 0.3)      // 30% chance to pause while playing
-	sm.AddTransition(pause, playback, 0.7)      // 70% chance to resume playback
-	sm.AddTransition(playback, browsing, 0.2)   // 20% chance to return to browsing after playback
-	sm.AddTransition(accountActivity, browsing, 0.9) // 90% chance to go back to browsing after account activity
-
-	return sm
-}
-*/

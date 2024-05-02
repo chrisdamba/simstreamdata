@@ -29,10 +29,10 @@ var rootCmd = &cobra.Command{
             fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
             os.Exit(1)
         }
-
-        err = cfg.InitializeVideos("data/title.basics.tsv.gz")
+        
+        err = cfg.InitializeMovies("data/imdb_movie_dataset")
         if err != nil {
-            fmt.Fprintf(os.Stderr, "Error loading video data: %v", err)
+            fmt.Fprintf(os.Stderr, "Error loading movies data: %v", err)
         }
         /*
         fmt.Println("Simulation started with the following configuration:")

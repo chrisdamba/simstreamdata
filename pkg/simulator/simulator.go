@@ -14,6 +14,8 @@ import (
 	"github.com/chrisdamba/simstreamdata/pkg/models"
 )
 
+const SECONDS_PER_YEAR = 31536000
+var lastTimeStamp time.Time
 type OutputDestination interface {
     WriteMessage(topic string, msg []byte) error
 }
@@ -23,9 +25,11 @@ type KafkaOutput struct {
 }
 
 type Simulator struct {
-    Config *config.Config
-    Users  []*models.User
-    StateMachine *models.StateMachine
+    Config          *config.Config
+    Rng             *rand.Rand
+    StateMachine    *models.StateMachine
+    Users           []*models.User
+    UserQueue       *models.UserQueue
 }
 
 type FileOutput struct {
@@ -46,7 +50,9 @@ type ConsoleOutput struct{}
 func NewSimulator(cfg *config.Config) *Simulator {
     return &Simulator{
         Config: cfg,
+        Rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
         Users:  []*models.User{},
+        UserQueue: models.NewUserQueue(),
     }
 }
 
@@ -110,14 +116,12 @@ func randomLogNormal(mean, stddev float64) float64 {
 }
 
 func (sim *Simulator) initializeUsers() {
-    stateMachine := models.InitializeStates(sim.Config) // Initialize a state machine for all users (or per user if different)
     for i := 0; i < sim.Config.NUsers; i++ {
         // Generate random preferences based on weighted selections
         initialLevel := sim.weightedRandomInitialLevel()
 
         // Determine the authorization level and subscription type with weights
         authLevel := sim.weightedRandomAuthLevel()
-        subscriptionType := sim.weightedRandomSubscriptionType()
 
         // Generate random genre preferences
         genrePreferences := sim.generateRandomGenrePreferences()
@@ -130,18 +134,15 @@ func (sim *Simulator) initializeUsers() {
             startTime,
             authLevel,
             initialLevel,
-            subscriptionType,
-            stateMachine,
+            sim.Config,
+            sim.Rng,
             genrePreferences,
         )
 
-        sim.AddSession(user)
+        sim.UserQueue.Enqueue(user)
     }
 }
 
-func (sim *Simulator) AddSession(user *models.User) {
-    sim.Users = append(sim.Users, user)
-}
 
 func (sim *Simulator) weightedRandomAuthLevel() string {
     return sim.selectRandomPreference(sim.Config.AuthLevels).Name
@@ -236,32 +237,16 @@ func (s *Simulator) pickContentType() string {
     return "audio" // default if something goes wrong
 }
 
-func (sim *Simulator) RunSession(user *models.User) {
-
-    // Selecting a video at the start of the session
-    selectedVideo := user.SelectVideo(sim.Config)
-    user.CurrentSession.CurrentVideo = selectedVideo
-
-    // Simulate watching the video
-    fmt.Printf("User %s is watching %s\n", user.ID, selectedVideo.PrimaryTitle)
-
-    // Check video progress to handle end of video or continue playing
-    user.CurrentSession.CheckVideoProgress()
-
-    // Simulate the end of the video
-    fmt.Printf("User %s finished watching %s\n", user.ID, selectedVideo.PrimaryTitle)
-
-    // Decide next action after the video ends
-    if user.DecidesToContinueWatching() {
-        // If continuing, select a new video
-        selectedVideo = user.SelectVideo(sim.Config)
-        user.CurrentSession.CurrentVideo = selectedVideo
-        fmt.Printf("User %s continued to watch %s\n", user.ID, selectedVideo.PrimaryTitle)
-    } else {
-        fmt.Printf("User %s ended their session.\n", user.ID)
-    }
+func showProgress(currentTime time.Time, events int) {
+	now := time.Now().UTC()
+	if events%10000 == 0 && !lastTimeStamp.IsZero() {
+		rate := 10000000 / int(now.Sub(lastTimeStamp).Milliseconds())
+		lastTimeStamp = now
+		message := fmt.Sprintf("\rNow: %s, Events: %d, Rate: %d eps", currentTime.Format(time.RFC3339), events, rate)
+		fmt.Fprint(os.Stderr, message)
+	}
+	lastTimeStamp = now // Update last timestamp for the next call
 }
-
 
 // RunSimulation starts the simulation process.
 func (sim *Simulator) RunSimulation() {
@@ -283,29 +268,28 @@ func (sim *Simulator) RunSimulation() {
     // Initialize variables for progress tracking
     var (
         eventsCount    int
-        lastReportTime = time.Now().UTC()
+        clock = sim.Config.StartTime
     )
-        
+
     // Run the simulation until the current time exceeds the end time
     simulationEndTime, _ := time.Parse(time.RFC3339, sim.Config.EndTime.Format(time.RFC3339))
+
     for range ticker.C {
         currentUTC := time.Now().UTC()
         if currentUTC.After(simulationEndTime) {
             log.Printf("Simulation end time reached: %s\n", simulationEndTime.Format(time.RFC3339))
             break // Exit the loop to end the simulation
         }
-        for _, user := range sim.Users {
-            // Ensure that the session exists and is not done
-            if user.CurrentSession == nil || user.CurrentSession.IsDone() {
-                rng := rand.New(rand.NewSource(currentUTC.UnixNano()))
-                user.CurrentSession = models.NewSession(user.ID.String(), user.StateMachine, user.SubscriptionType, 0, user.StartTime, rng, sim.Config)
-            }
+        showProgress(clock, eventsCount)
+        user, ok := sim.UserQueue.Dequeue()
+        if !ok {
+            log.Printf("No more users in the queue\n")
+            break
+        }
 
-            // Run a session handling logic
-            sim.RunSession(user)
-
-            // Process the next event in the current session
-            eventMsg, err := user.NextEvent(rand.New(rand.NewSource(currentUTC.UnixNano())), sim.Config)
+        clock := user.CurrentSession.NextEventTime
+        if clock.After(sim.Config.StartTime) {
+            eventMsg, err := user.Serialize(sim.Rng, sim.Config)
             if err != nil {
                 log.Printf("Error during event generation: %v", err)
                 continue
@@ -313,16 +297,21 @@ func (sim *Simulator) RunSimulation() {
             if err := output.WriteMessage(eventMsg.Topic, eventMsg.Message); err != nil {
                 log.Printf("Failed to write message: %v", err)
             }
-            eventsCount++
         }
+        // Duration in seconds
+        durationSeconds := simulationEndTime.Sub(sim.Config.StartTime).Seconds()
 
-        // Calculate and display the rate of events
-        if currentUTC.Sub(lastReportTime) >= eventRateCalcInterval {
-            rate := float64(eventsCount) / currentUTC.Sub(lastReportTime).Seconds()
-            log.Printf("Time: %s, Events: %d, Rate: %.2f eps\n", currentUTC.Format(time.RFC3339), eventsCount, rate)
-            eventsCount = 0
-            lastReportTime = currentUTC
-        }
+        // Convert duration from seconds to years
+        durationYears := durationSeconds / SECONDS_PER_YEAR
+
+        // Calculate attrition
+        var prAttrition = float64(sim.Config.NUsers) * sim.Config.AttritionRate * durationYears
+
+        // Process the next event in the current session
+        user.NextEvent(prAttrition)
+        eventsCount++
+
+        
     }
     log.Printf("Simulation completed at %s\n", time.Now().UTC().Format(time.RFC3339))
 }

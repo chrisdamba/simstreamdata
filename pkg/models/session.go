@@ -3,7 +3,9 @@ package models
 import (
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/chrisdamba/simstreamdata/pkg/config"
@@ -40,17 +42,26 @@ type Content struct {
 }
 
 type Session struct {
-    ID              string
-    UserID          string
+    ID              int64
     StartTime       time.Time 
     LastEvent       time.Time 
 
+    Alpha           float64 // expected request inter-arrival time  
+    Beta            float64 // expected session inter-arrival time
+    Auth            string // Auth
+    Level           string // Level
+    ItemInSession   int     // ItemInSession
+
     CurrentState    *State
+    PreviousState   *State
     StateMachine    *StateMachine
+    StateMap        *AuthLevelStateMap
 
     CurrentContent  *Content  
     CurrentAd       *Ad 
     CurrentVideo    *config.Video
+    CurrentMovie    *config.Movie
+    CurrentMovieEnd time.Time
     VideoEndTime    time.Time
     
     // State tracking
@@ -67,30 +78,157 @@ type Session struct {
 	Config          *config.Config
 }
 
-func NewSession(userID string, stateMachine *StateMachine, subscriptionTier SubscriptionType, engagementLevel int, startTime time.Time, rng *rand.Rand, config *config.Config) *Session {
-    sessionID := fmt.Sprintf("%s-%d", userID, time.Now().UnixNano())
+// SessionIDCounter holds the current count for session IDs.
+var sessionIDCounter int64
+var lock sync.Mutex
 
-    // Calculate the initial next event time.
-    // Here we assume the initial delay for the next event is between 1 to 5 minutes.
-    initialDelay := time.Duration(rng.Intn(5)+1) * time.Minute
-    nextEventTime := startTime.Add(initialDelay)
+// NextSessionID increments the session ID counter and returns the next ID.
+func NextSessionID() int64 {
+    lock.Lock()
+    defer lock.Unlock()
+    sessionIDCounter++
+    return sessionIDCounter
+}
+
+func NewSession(nextEventTime time.Time, alpha float64, beta float64, stateMap *AuthLevelStateMap, auth string, level string, rng *rand.Rand, cfg *config.Config) *Session {
+    var currentMovie *config.Movie
+    var currentMovieEnd time.Time
+    currentState := stateMap.GetRandomState(auth, level, rng)
+    if currentState.Page == "NextVideo" {
+        currentMovie = cfg.NextMovie() 
+        currentMovieEnd = nextEventTime.Add(currentMovie.RuntimeMinutes)
+    } else {
+        currentMovie = nil 
+        currentMovieEnd = time.Time{}
+    }
+
 
     return &Session{
-        ID: sessionID,
-        UserID: userID,
-        SubscriptionTier: subscriptionTier,
-        EngagementLevel: engagementLevel,
-        StartTime: startTime,
-        LastEvent: startTime,
-        CurrentState: stateMachine.CurrentState,
-        StateMachine: stateMachine,
+        ID: NextSessionID(),
+        Alpha: alpha,
+        Beta: beta,
+        Auth: auth,
+        Level: level,
+        StateMap:     stateMap,
+        CurrentState: currentState,
         NextEventTime: nextEventTime,
 		Rng: rng,
-		Config: config,
+		Config: cfg,
+        Finished: false,
+        CurrentMovie: currentMovie,
+        CurrentMovieEnd: currentMovieEnd,
+        ItemInSession: 0,
     }
 }
 
+
+func (s *Session) NextSession() *Session {
+    nextEventTime := s.PickNextSessionStartTime(s.NextEventTime, s.Beta)
+
+    nextSession := NewSession(nextEventTime, s.Alpha, s.Beta, s.StateMap, s.Auth, s.Level, s.Rng, s.Config)
+    return nextSession
+}
+
 func (s *Session) IncrementEvent() {
+    nextState := s.CurrentState.GetNextState(s.Rng)
+    switch {
+        case nextState == nil:
+            fmt.Println("Next state is nil, marking session as finished.")
+            s.Finished = true
+        case nextState.StatusCode >= 300 && nextState.StatusCode <= 399:
+            fmt.Println("Status code is within the range [300, 399].")
+            s.NextEventTime = s.NextEventTime.Add(time.Second)
+            s.CurrentState = nextState
+            s.ItemInSession += 1
+        case nextState.Page == "NextVideo":
+            fmt.Println("Transitioning to NextVideo state.")
+            if s.CurrentMovie == nil {
+                fmt.Println("Starting a new movie.")
+                seconds := exponentialRandomValue(s.Rng, s.Alpha)
+                s.NextEventTime = s.NextEventTime.Add(time.Duration(seconds))
+            } else if s.NextEventTime.Before(s.CurrentMovieEnd) {
+                fmt.Println("Current movie has not ended yet.")
+                s.NextEventTime = s.CurrentMovieEnd
+                s.CurrentMovie = s.Config.NextMovie()
+            } else {
+                fmt.Println("Current movie has ended. Starting a new movie.")
+                seconds := exponentialRandomValue(s.Rng, s.Alpha)
+                s.NextEventTime = s.NextEventTime.Add(time.Duration(seconds))
+                s.CurrentMovie = s.Config.NextMovie()
+            }
+            s.CurrentMovieEnd = s.NextEventTime.Add(s.CurrentMovie.RuntimeMinutes)
+            s.PreviousState = s.CurrentState
+            s.CurrentState = nextState
+            s.ItemInSession += 1
+        case nextState.Page == "AdStart":
+            fmt.Println("Starting an advertisement.")
+            s.startAd()
+    
+        case nextState.Page == "AdImpression":
+            fmt.Println("Recording an ad impression.")
+            s.scheduleNextAdImpression()
+    
+        case nextState.Page == "AdEnd":
+            fmt.Println("Ad has completed.")
+            s.finishAdAndResumeContent()
+        default:
+            fmt.Println("Default case.")
+            seconds := exponentialRandomValue(s.Rng, s.Alpha)
+            s.NextEventTime = s.NextEventTime.Add(time.Duration(seconds))
+            s.CurrentState = nextState
+            s.ItemInSession += 1
+	}
+}
+
+// exponentialRandomValue returns a random value drawn from an exponential distribution with mean mu.
+// This version uses a local RNG for better reproducibility and safety across different packages.
+func exponentialRandomValue(rng *rand.Rand, mu float64) float64 {
+	// rng.Float64() returns a float64 in [0.0,1.0)
+	// Use -mu * log(1 - X) to transform a uniform random number into an exponential distribution
+	return -mu * math.Log(1-rng.Float64())
+}
+
+func (s *Session) startAd() {
+    adDuration := 30 * time.Second // Example ad duration
+    adID := fmt.Sprintf("Ad-%d", s.Rng.Int())
+    s.CurrentAd = &Ad{
+        ID:        adID,
+        Type:      "Standard",
+        Duration:  adDuration,
+        StartTime: time.Now(),
+    }
+    s.NextEventType = "AdImpression"
+    s.NextEventTime = time.Now().Add(adDuration)
+    s.LastAdTime = time.Now()    // Update the last ad time
+
+	// Log the ad start for debugging.
+	log.Printf("Starting Standard ad at %v, ID: %s\n", s.NextEventTime, adID)
+}
+
+func (s *Session) scheduleNextAdImpression() {
+    // Simulating ad impression intervals and optionally ending the ad.
+    if rand.Float64() < 0.8 { // Example probability to continue ad impressions
+        s.NextEventTime = time.Now().Add(5 * time.Second) // Next impression
+    } else {
+        s.NextEventTime = time.Now().Add(5 * time.Second) // End of ad
+        s.NextEventType = "AdEnd"
+    }
+}
+
+func (s *Session) finishAdAndResumeContent() {
+    s.CurrentAd = nil // Clear the ad
+    s.NextEventType = "NextVideo" // Resume video playback
+    s.NextEventTime = time.Now().Add(1 * time.Minute) // Example delay before next content
+}
+
+
+
+
+
+
+
+
+func (s *Session) IncrementEvent_Old() {
     now := time.Now()
 
     	// Check if it's time for the next event
@@ -114,7 +252,8 @@ func (s *Session) handleTransition(nextState *State) {
         case "AdStart", "AdImpression", "AdEnd":
             s.handleAdEvent()
         default:
-            s.scheduleNextEvent("generic")
+            nState := nextState.GetNextState(s.Rng)
+            s.scheduleNextEvent(nState.Page)
 	}
 }
 
@@ -123,7 +262,7 @@ func (s *Session) handleContent() {
 	if s.CurrentState.Page == "NextSong" && s.CurrentContent != nil && s.CurrentContent.Type == Audio {
 		// Simulate time till next song
 		nextDuration := time.Duration(s.Rng.ExpFloat64()*float64(s.Config.Alpha)) * time.Second
-		s.scheduleNextEventAt("song", nextDuration)
+		s.scheduleNextEventAt("NextSong", nextDuration)
 	}
 	if s.CurrentState.Page == "PlayVideo" && s.CurrentContent != nil && s.CurrentContent.Type == VideoType {
 		// Check and handle mid-roll ad insertion
@@ -132,7 +271,7 @@ func (s *Session) handleContent() {
 			return
 		}
 		nextDuration := time.Duration(s.Rng.ExpFloat64()*float64(s.Config.Alpha)) * time.Second
-		s.scheduleNextEventAt("video content", nextDuration)
+		s.scheduleNextEventAt("PlayVideo", nextDuration)
 	}
 }
 
@@ -140,7 +279,7 @@ func (s *Session) handleContent() {
 func (s *Session) handleAdEvent() {
 	// Define ad handling logic
 	switch s.NextEventType {
-        case "AdStart":
+        case "AdStart", "":
             // Move to AdImpression
             s.CurrentAd.StartTime = time.Now()
             s.NextEventType = "AdImpression"
@@ -155,13 +294,8 @@ func (s *Session) handleAdEvent() {
 	s.scheduleNextEvent(s.NextEventType)
 }
 
-func (s *Session) finishAdAndResumeContent() {
-    s.CurrentAd = nil // Clear the ad
-    s.NextEventType = "Content"
-    s.scheduleNextEvent("resume content")
-}
 
-func (s *Session) scheduleNextAdImpression() {
+func (s *Session) scheduleNextAdImpression_Old() {
     // Move to AdComplete or next AdImpression
     if s.Rng.Float64() < 0.8 { // 80% chance to go to next impression
         s.NextEventType = "AdImpression"
@@ -188,7 +322,7 @@ func (s *Session) HandleNextVideoEvent(config *config.Config) {
     }
 
     // If no ads are to be inserted, schedule the next content event
-    s.scheduleNextEvent("video content")
+    s.scheduleNextEvent("PlayVideo")
 }
 
 
@@ -287,28 +421,11 @@ func (s *Session) CheckVideoProgress() {
         // Video has ended, clear the current video
         s.CurrentVideo = nil
 
-        // Handle next steps based on the session's logic
-        s.decideNextSteps()
+
     }
 }
 
-// decideNextSteps decides what happens after a video ends.
-func (s *Session) decideNextSteps() {
-    if rand.Float64() < 0.5 { // 50% chance to pick a new video or end session
-        videos := s.Config.AllVideos
-        if len(videos) > 0 {
-            // Randomly select a new video from the list
-            newVideo := videos[rand.Intn(len(videos))]
-            s.StartVideo(&newVideo)
-        } else {
-            // No videos available, end session
-            s.EndSession()
-        }
-    } else {
-        // Simulate ending the session
-        s.EndSession()
-    }
-}
+
 
 func (s *Session) ShouldContinueSession() bool {
 	// Check if the session is already marked as finished.
@@ -344,4 +461,29 @@ func (s *Session) ShouldContinueSession() bool {
 func (s *Session) EndSession() {
     log.Printf("Session %s ended", s.ID)
     // Clean up session resources or log session completion
+}
+
+// pickNextSessionStartTime generates a new session start time by adding a randomized interval.
+func (s *Session) PickNextSessionStartTime(lastTimeStamp time.Time, beta float64) time.Time {
+    interval := s.generateExponential(beta) + s.Config.SessionGap
+    return lastTimeStamp.Add(time.Duration(interval) * time.Second)
+}
+
+// generateExponential generates values from an exponential distribution.
+// Beta is the expected session inter-arrival time (mean interval between events).
+func (s *Session) generateExponential(beta float64) float64 {
+    return rand.ExpFloat64() / (1 / beta) // Lambda is the rate parameter, which is 1/beta.
+}
+
+// pickFirstTimeStamp generates an initial timestamp for the session start.
+func (s *Session) PickFirstTimeStamp(start time.Time, beta float64) time.Time {
+    // Pick random start point, iterate to steady state.
+    candidate := start.Add(-time.Duration(2*beta) * time.Second)
+    for {
+        candidate = s.PickNextSessionStartTime(candidate, beta)
+        if candidate.After(start.Add(-time.Duration(beta) * time.Second)) {
+            break
+        }
+    }
+    return candidate
 }
