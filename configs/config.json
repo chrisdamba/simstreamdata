@@ -40,7 +40,7 @@
     {"name": "Show 2", "weight": 5},
     {"name": "Show 3", "weight": 85}
   ],
-  "levels" : [{"name":"free","weight":10}, {"name":"basic","weight":3}, {"name":"paid","weight":2}],
+  "levels" : [{"name":"free","weight":10}, {"name":"paid","weight":2}],
   "auth-levels": [
     {"name": "Guest", "weight": 30},
     {"name": "Logged In", "weight": 60},

@@ -1,6 +1,8 @@
 package models
 
 import (
+	"fmt"
+	"log"
 	"math/rand"
 	"time"
 
@@ -13,7 +15,9 @@ type State struct {
 	Method        string
 	UserLevel     string
 	AuthStatus    string
-	Transitions   []Transition
+	Laterals      map[*State]float64
+	Upgrades      map[*State]float64
+	Downgrades    map[*State]float64
 	EventTime 	  time.Time
 }
 
@@ -32,6 +36,19 @@ type AuthLevelStateMap struct {
 	Generators map[string]*WeightedRandomThingGenerator[*State]
 }
 
+func NewState(page string, statusCode int, method string, userLevel string, authStatus string, eventTime time.Time) *State {
+	return &State{
+		Page:       page,
+		StatusCode: statusCode,
+		Method:     method,
+		UserLevel:  userLevel,
+		AuthStatus: authStatus,
+		EventTime:  eventTime,
+		Laterals:   make(map[*State]float64),
+		Upgrades:   make(map[*State]float64),
+		Downgrades: make(map[*State]float64),
+	}
+}
 
 func NewStateMachine(rng *rand.Rand) *StateMachine {
 	return &StateMachine{
@@ -52,18 +69,6 @@ func (sm *StateMachine) SetInitialState(state *State) {
 func (sm *StateMachine) SetRandomInitialState(rng *rand.Rand, cfg *config.Config, stateMap map[string]*State) {
 	if sm.StateGenerator != nil {
 		initialState := sm.StateGenerator.RandomThing(rng)
-		// Check if initial state has transitions
-		if len(initialState.Transitions) == 0 {
-			// Find all transitions where the initial state is the source
-			for _, trans := range cfg.Transitions {
-				if trans.Source.Page == initialState.Page {
-						destState := stateMap[trans.Dest.Page]
-						if destState != nil {
-							initialState.AddTransition(destState, trans.P)
-						}
-				}
-			}
-		}
 		sm.CurrentState = initialState
 	}
 }
@@ -78,23 +83,50 @@ func (sm *StateMachine) UpdateState(rng *rand.Rand) {
 	}
 }
 
-func (s *State) AddTransition(target *State, probability float64) {
-	s.Transitions = append(s.Transitions, Transition{State: target, Probability: probability})
+func (s *State) addTransition(target *State, probability float64, transitionMap map[*State]float64) error {
+	totalProbability := 0.0
+	for _, prob := range transitionMap {
+		totalProbability += prob
+	}
+	if totalProbability+probability > 1.0 {
+		return fmt.Errorf("total transition probability would exceed 100%%")
+	}
+	transitionMap[target] = probability
+	return nil
+}
+
+func (s *State) AddLateralTransition(target *State, probability float64) error {
+	return s.addTransition(target, probability, s.Laterals)
+}
+
+func (s *State) AddUpgradeTransition(target *State, probability float64) error {
+	return s.addTransition(target, probability, s.Upgrades)
+}
+
+func (s *State) AddDowngradeTransition(target *State, probability float64) error {
+	return s.addTransition(target, probability, s.Downgrades)
 }
 
 func (s *State) GetNextState(rng *rand.Rand) *State {
-	if len(s.Transitions) == 0 {
-		return nil
+	combinedTransitions := make(map[*State]float64)
+	for state, prob := range s.Laterals {
+		combinedTransitions[state] += prob
+	}
+	for state, prob := range s.Upgrades {
+		combinedTransitions[state] += prob
+	}
+	for state, prob := range s.Downgrades {
+		combinedTransitions[state] += prob
 	}
 	p := rng.Float64()
 	total := 0.0
-	for _, t := range s.Transitions {
-		total += t.Probability
+	for state, prob := range combinedTransitions {
+		total += prob
 		if p < total {
-			return t.State
+			return state
 		}
 	}
-	return nil // Return nil if no transition is found (or default state)
+	return nil // Return nil if no transition is found
 }
 
 func NewAuthLevelStateMap() *AuthLevelStateMap {
@@ -124,14 +156,14 @@ func InitializeStatesWithAuthLevel(cfg *config.Config, rng *rand.Rand) *AuthLeve
 	tempStateMap := make(map[string]*State) 
 	sm := NewStateMachine(rng)
 	for _, page := range cfg.NewSessionPages {
-		state := &State{
-			Page:       page.Page,
-			StatusCode: page.Status,
-			Method:     page.Method,
-			UserLevel:  page.Level,
-			AuthStatus: page.Auth,
-			EventTime:  time.Now(),
-		}
+		state := NewState(
+			page.Page,
+			page.Status,
+			page.Method,
+			page.Level,
+			page.Auth,
+			time.Now(),
+		)
 		sm.AddState(state, page.Weight)
 		stateMap.Add(page.Auth, page.Level, state, page.Weight)
 		tempStateMap[page.Page] = state
@@ -141,7 +173,9 @@ func InitializeStatesWithAuthLevel(cfg *config.Config, rng *rand.Rand) *AuthLeve
 		sourceState := tempStateMap[trans.Source.Page]
 		destState := tempStateMap[trans.Dest.Page]
 		if sourceState != nil && destState != nil {
-			sourceState.AddTransition(destState, trans.P)
+			if err := sourceState.AddLateralTransition(destState, trans.P); err != nil {
+				log.Printf("Error adding transition: %v", err)
+			}			
 		}
 	}
 
